@@ -122,7 +122,7 @@ DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 QUEUE_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 PROFILE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 EVERY_RE = re.compile(r"^([0-9]+)([mhd])$")
-CRON_RE = re.compile(r"^[0-9*/,\s-]+$")
+CRON_RE = re.compile(r"[0-9*/, -]+")
 GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,64}$")
 # Deliberately narrow: scheme, host, optional port, optional path. No user
 # info, no query string, no fragment, and no character that could confuse the
@@ -612,7 +612,7 @@ class Validator:
             s = self.as_str(m["cron"], path + ".cron")
             if s is None:
                 return None
-            if not CRON_RE.match(s) or len(s.split()) != 5:
+            if not CRON_RE.fullmatch(s) or len(s.split()) != 5:
                 self.err(path + ".cron", "expected five cron fields using digits and * / , - only")
                 return None
             return ("cron", s)
@@ -1531,7 +1531,7 @@ class Validator:
                 s = self.as_str(pm["cron"], p + ".cron")
                 if s is None:
                     continue
-                if not CRON_RE.match(s) or len(s.split()) != 5:
+                if not CRON_RE.fullmatch(s) or len(s.split()) != 5:
                     self.err(p + ".cron",
                              "expected five cron fields using digits and * / , - only")
                     continue
