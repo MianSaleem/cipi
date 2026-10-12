@@ -459,9 +459,9 @@ db_restore_database() {
             # Wipe public schema then restore (parity with drop/reimport)
             _db_pgsql_exec -d "$name" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \"${name}\"; ALTER SCHEMA public OWNER TO \"${name}\";" 2>/dev/null || true
             if [[ "$file" == *.gz ]]; then
-                gunzip -c "$file" | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=0 >/dev/null 2>&1
+                gunzip -c "$file" | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>&1
             else
-                PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=0 -f "$file" >/dev/null 2>&1
+                PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 -f "$file" >/dev/null 2>&1
             fi
             ;;
         *) return 1 ;;
