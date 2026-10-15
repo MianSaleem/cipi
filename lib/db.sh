@@ -446,26 +446,73 @@ db_dump_database_ex() {
     [[ -s "$outfile" ]]
 }
 
+# The dump as a stream, however it is stored.
+_db_dump_cat() {
+    if [[ "$1" == *.gz ]]; then gunzip -c "$1"; else cat "$1"; fi
+}
+
+# psql stops at the first failed statement (ON_ERROR_STOP), so the preamble of
+# a dump taken on a newer PostgreSQL must not trip it: pg_dump 17 writes
+# `SET transaction_timeout = 0;`, which PostgreSQL 16 (Ubuntu 24.04) refuses as
+# an unknown parameter. Such a dump arrives with `cipi sync` from a newer server
+# or with `cipi db restore` of a file made elsewhere. The preamble's SET lines
+# whose parameter this server does not have are dropped. Nothing past the
+# preamble is touched, so a COPY data line that happens to start with "SET "
+# goes through as is. When the settings cannot be read the dump passes unchanged.
+_db_pgsql_restore_filter() {
+    local dbr="$1" known
+    # One line, space-separated: BSD awk refuses a newline in a -v value.
+    known=$(PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d postgres -tAc \
+        "SELECT name FROM pg_settings" 2>/dev/null | tr '\n' ' ')
+    if [[ -z "${known// /}" ]]; then cat; return; fi
+    awk -v known="$known" '
+        BEGIN { n = split(known, k, " "); for (i = 1; i <= n; i++) if (k[i] != "") have[k[i]] = 1; pre = 1 }
+        pre && /^SET [A-Za-z_.]+ = / { if (!($2 in have)) next; print; next }
+        pre && (/^$/ || /^--/ || /^\\(un)?restrict/ || /^SELECT pg_catalog\.set_config\(/) { print; next }
+        { pre = 0; print }
+    '
+}
+
+# The first error the client printed, so "Restore failed" says what to fix.
+_db_restore_say_why() {
+    local engine="$1" errf="$2" line
+    line=$(grep -m1 -E 'ERROR|FATAL|error:|gzip:' "$errf" 2>/dev/null | tr -s ' ')
+    [[ -n "$line" ]] || line=$(grep -v '^[[:space:]]*$' "$errf" 2>/dev/null | tail -1)
+    [[ -n "$line" ]] && error "$(db_engine_label "$engine") restore: ${line}"
+    return 0
+}
+
+# Restore a dump into an existing database. Returns non-zero when the import
+# did not complete, and says why. Both clients stop at the first failed
+# statement (mariadb by default, psql through ON_ERROR_STOP=1), so a dump that
+# cannot be imported is reported instead of leaving an empty database behind a
+# success message. The pipelines run with pipefail of their own: a dump that
+# does not even uncompress must not count as restored either.
 db_restore_database() {
     local engine="$1" name="$2" file="$3"
+    local err rc=0
+    err=$(mktemp) || return 1
     case "$engine" in
         mariadb)
             local dbr; dbr=$(db_get_root_password mariadb)
-            if [[ "$file" == *.gz ]]; then gunzip -c "$file" | mariadb -u root -p"$dbr" "$name" 2>/dev/null
-            else mariadb -u root -p"$dbr" "$name" <"$file" 2>/dev/null; fi
+            ( set -o pipefail
+              _db_dump_cat "$file" 2>>"$err" \
+                | mariadb -u root -p"$dbr" "$name" >/dev/null 2>>"$err" ) || rc=$?
             ;;
         pgsql)
             local dbr; dbr=$(db_get_root_password pgsql)
             # Wipe public schema then restore (parity with drop/reimport)
             _db_pgsql_exec -d "$name" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \"${name}\"; ALTER SCHEMA public OWNER TO \"${name}\";" 2>/dev/null || true
-            if [[ "$file" == *.gz ]]; then
-                gunzip -c "$file" | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>&1
-            else
-                PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 -f "$file" >/dev/null 2>&1
-            fi
+            ( set -o pipefail
+              _db_dump_cat "$file" 2>>"$err" \
+                | _db_pgsql_restore_filter "$dbr" \
+                | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>>"$err" ) || rc=$?
             ;;
-        *) return 1 ;;
+        *) rm -f "${err:?}"; return 1 ;;
     esac
+    if (( rc != 0 )); then _db_restore_say_why "$engine" "$err"; fi
+    rm -f "${err:?}"
+    return "$rc"
 }
 
 db_laravel_env_block() {
