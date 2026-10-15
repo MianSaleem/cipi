@@ -122,6 +122,9 @@ DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 QUEUE_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 PROFILE_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 EVERY_RE = re.compile(r"^([0-9]+)([mhd])$")
+# Only a plain space between fields: \s would also accept a newline or a tab,
+# and the expression is written as is into a crontab line, where a newline
+# splits it in two. Checked with fullmatch(), hence no anchors.
 CRON_RE = re.compile(r"[0-9*/, -]+")
 GLOB_RE = re.compile(r"^[a-zA-Z0-9_.*?\[\]-]{1,64}$")
 # Deliberately narrow: scheme, host, optional port, optional path. No user
@@ -615,7 +618,9 @@ class Validator:
             if not CRON_RE.fullmatch(s) or len(s.split()) != 5:
                 self.err(path + ".cron", "expected five cron fields using digits and * / , - only")
                 return None
-            return ("cron", s)
+            # One space between fields: the crontab line is compared with what
+            # is installed, so the same schedule must always read the same.
+            return ("cron", " ".join(s.split()))
         self.err(path, "'every' (30m, 6h, 1d) or 'cron' is required")
         return None
 
@@ -1535,7 +1540,7 @@ class Validator:
                     self.err(p + ".cron",
                              "expected five cron fields using digits and * / , - only")
                     continue
-                prof["cron"] = s
+                prof["cron"] = " ".join(s.split())
 
             if "destinations" in pm:
                 items = self.expect_list(pm["destinations"], p + ".destinations")

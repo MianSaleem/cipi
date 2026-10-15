@@ -294,6 +294,15 @@ bad $'crons:\n  - run: artisan inspire' "'every' (30m, 6h, 1d) or 'cron' is requ
 bad $'crons:\n  - every: 7m\n    run: artisan inspire' "divide 60 evenly" "crons every 7m"
 bad $'crons:\n  - every: 1h\n    run: rm -rf /' "unknown runner" "crons free-form shell command"
 bad $'crons:\n  - every: 1h\n    run: artisan tinker' "tinker is not allowed" "crons artisan tinker"
+# \s in the old charset let a YAML "\n" through; crontab then refused the whole block.
+bad $'crons:\n  - cron: "0 0 1 1\\n*"\n    run: artisan x' "five cron fields" "crons cron with an embedded newline"
+bad $'crons:\n  - cron: "0 0\\t* * *"\n    run: artisan x' "five cron fields" "crons cron with a tab"
+bad $'crons:\n  - cron: "0 0 * * *;id"\n    run: artisan x' "five cron fields" "crons cron with trailing garbage"
+bad $'backup:\n  profiles:\n    - name: shop-nightly\n      scope: all\n      cron: "0 0 1 1\\n*"\n      keep: 7\n      destinations: [local]' "five cron fields" "backup profile cron with an embedded newline"
+printf 'version: 1\ncrons:\n  - cron: " 0  3 * * 1 "\n    run: artisan x\n' > "${TMP}/cron-sp.yml"
+r=$(val "${TMP}/cron-sp.yml")
+[[ "$(jq -r '.data.crons[0].cron' <<< "$r")" == "0 3 * * 1" ]] \
+    && pass "cron expression stored with single spaces" || fail "cron not normalized: $(jq -c . <<< "$r")"
 
 echo "-- cipi.yml deploy config / limits / ssl / env / crons (plan)"
 out=$(plan "${TMP}/n1.yml")

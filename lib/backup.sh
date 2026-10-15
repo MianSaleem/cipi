@@ -214,13 +214,15 @@ _bk_glob_match() {
     return 1
 }
 
-# Cron expression: exactly 5 whitespace-separated fields of a safe charset.
-# Written straight into root's crontab, so nothing else may pass.
+# Cron expression: exactly 5 space-separated fields of a safe charset.
+# Written straight into root's crontab, so nothing else may pass. Only a plain
+# space between fields: [[:space:]] would also accept a newline or a tab, and a
+# newline splits the crontab line in two (the whole block is then refused).
 _bk_valid_cron() {
-    local expr="$1"
-    [[ "$expr" =~ ^[0-9*/,[:space:]-]+$ ]] || return 1
-    local n; n=$(echo "$expr" | awk '{print NF}')
-    [[ "$n" -eq 5 ]]
+    local expr="$1" re='^[0-9*/, -]+$'
+    [[ "$expr" =~ $re ]] || return 1
+    local -a fields; read -ra fields <<< "$expr"
+    [[ ${#fields[@]} -eq 5 ]]
 }
 
 # --every=30m|6h|1d → "<interval-seconds><TAB><cron expression>".
