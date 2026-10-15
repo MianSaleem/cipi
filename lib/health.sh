@@ -166,10 +166,13 @@ _health_list() {
     fi
 
     echo -e "\n${BOLD}Healthchecks${NC}"
-    echo "$json" | jq -r 'to_entries[] | select(.value.health_url != null and .value.health_url != "") | "\(.key)\t\(.value.health_url)\t\(.value.health_expect // "200")"' \
-        | while IFS=$'\t' read -r app url expect; do
-            printf "  %-16s %-50s expect=%s\n" "$app" "$url" "$expect"
-        done
+    tbl_start
+    local app url expect
+    while IFS=$'\t' read -r app url expect; do
+        [[ -n "$app" ]] || continue
+        tbl_row "$app" "$url" "expect=${expect}"
+    done < <(echo "$json" | jq -r 'to_entries[] | select(.value.health_url != null and .value.health_url != "") | "\(.key)\t\(.value.health_url)\t\(.value.health_expect // "200")"')
+    tbl_print
     echo ""
 }
 

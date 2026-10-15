@@ -184,9 +184,11 @@ _worker_list() {
     if [[ "$(app_get "$app" horizon)" == "true" ]]; then
         echo -e "  ${CYAN}Mode: Horizon${NC}"
     fi
-    printf "  ${BOLD}%-28s %-10s %-6s %s${NC}\n" "PROGRAM" "QUEUE" "PROCS" "STATUS"
-    grep "^\[program:" "$conf" | sed 's/\[program://;s/\]//' | while read -r prog; do
-        local q np st c
+    tbl_start
+    tbl_head "PROGRAM" "QUEUE" "PROCS" "STATUS"
+    local prog q np st c
+    while read -r prog; do
+        [[ -n "$prog" ]] || continue
         if [[ "$prog" == "${app}-horizon" ]]; then
             q="horizon"
         elif [[ "$prog" == "${app}-octane" ]]; then
@@ -200,8 +202,10 @@ _worker_list() {
         st=$(supervisorctl status "${prog}:*" 2>/dev/null|head -1|awk '{print $2}'||echo "?")
         [[ -z "$st" || "$st" == "?" ]] && st=$(supervisorctl status "${prog}" 2>/dev/null|awk '{print $2}'||echo "?")
         c="${GREEN}"; [[ "$st" != "RUNNING" ]] && c="${RED}"
-        printf "  %-28s %-10s %-6s ${c}%s${NC}\n" "$prog" "$q" "${np:-1}" "$st"
-    done; echo ""
+        tbl_row "$prog" "$q" "${np:-1}" "${c}${st}${NC}"
+    done < <(grep "^\[program:" "$conf" | sed 's/\[program://;s/\]//')
+    tbl_print
+    echo ""
 }
 
 _worker_remove() {

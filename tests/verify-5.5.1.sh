@@ -321,6 +321,8 @@ cat > "${TMP}/apps.json" <<'EOF'
 }
 EOF
 eval "$(fnx "${LIB}/app.sh" app_list)"
+# app_list prints through lib/table.sh (loaded by common.sh in the shipped binary)
+source "${LIB}/table.sh"
 supervisorctl() { :; }; systemctl() { :; }
 out=$(app_list 2>/dev/null)
 rt() { awk -v a="$1" '$2 == a { print $5 }' <<< "$out"; }

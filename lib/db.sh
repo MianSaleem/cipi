@@ -871,7 +871,8 @@ _db_list() {
     app_meta=$(vault_read apps.json 2>/dev/null)
 
     echo -e "\n${BOLD}Databases${NC}"
-    printf "  ${BOLD}%-10s %-20s %-15s %s${NC}\n" "ENGINE" "DATABASE" "USER" "SIZE"
+    tbl_start
+    tbl_head "ENGINE" "DATABASE" "USER" "SIZE"
 
     local engine
     for engine in "${engines[@]}"; do
@@ -900,7 +901,7 @@ _db_list() {
                     fi
                     [[ -z "$u" ]] && u="—"
                     [[ -z "$sz" || "$sz" == "NULL" ]] && sz="0"
-                    printf "  %-10s %-20s %-15s %s MB\n" "mariadb" "$db" "$u" "$sz"
+                    tbl_row "mariadb" "$db" "$u" "${sz} MB"
                 done <<< "$rows"
                 ;;
             pgsql)
@@ -926,11 +927,12 @@ _db_list() {
                     fi
                     [[ -z "$u" ]] && u="—"
                     [[ -z "$sz" || "$sz" == "NULL" ]] && sz="0"
-                    printf "  %-10s %-20s %-15s %s MB\n" "pgsql" "$db" "$u" "$sz"
+                    tbl_row "pgsql" "$db" "$u" "${sz} MB"
                 done <<< "$rows"
                 ;;
         esac
     done
+    tbl_print
     echo ""
 }
 

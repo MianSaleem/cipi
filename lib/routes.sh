@@ -633,31 +633,40 @@ routes_list() {
         if [[ "$(jq '.redirects | length' <<< "$cfg")" -eq 0 ]]; then
             echo -e "  ${DIM}No path redirects${NC}"
         else
-            printf "  ${BOLD}%-5s %-8s %-30s %s${NC}\n" "CODE" "MATCH" "FROM" "TO"
-            jq -r '.redirects[] | [
+            tbl_start
+            tbl_head "CODE" "MATCH" "FROM" "TO"
+            local c m f t
+            local rows
+            rows=$(jq -r '.redirects[] | [
                 (.code|tostring),
                 (if (.from|endswith("/")) then "prefix" else "exact" end),
                 (.from + (if (.from|endswith("/")) and .keep_path != false then "*" else "" end)),
                 (.to + (if (.from|endswith("/")) and .keep_path != false then "*" else "" end))
-            ] | @tsv' <<< "$cfg" | while IFS=$'\t' read -r c m f t; do
-                printf "  ${CYAN}%-5s${NC} %-8s %-30s %s\n" "$c" "$m" "$f" "$t"
-            done
+            ] | @tsv' <<< "$cfg")
+            while IFS=$'\t' read -r c m f t; do
+                tbl_row "${CYAN}${c}${NC}" "$m" "$f" "$t"
+            done <<< "$rows"
+            tbl_print
         fi
     else
         if [[ "$(jq '.proxies | length' <<< "$cfg")" -eq 0 ]]; then
             echo -e "  ${DIM}No proxy routes${NC}"
         else
-            printf "  ${BOLD}%-24s %-40s %s${NC}\n" "PREFIX" "UPSTREAM" "OPTIONS"
-            jq -r '.proxies[] | [
+            tbl_start
+            tbl_head "PREFIX" "UPSTREAM" "OPTIONS"
+            local p u o rows
+            rows=$(jq -r '.proxies[] | [
                 .prefix, .upstream,
                 ([ (if .strip_prefix then "strip-prefix" else "keep-prefix" end),
                    (if .preserve_host then "preserve-host" else empty end),
                    ("timeout=\(.timeout // 60)s"),
                    (if .buffering == false then "no-buffering" else empty end)
                  ] | join(" "))
-            ] | @tsv' <<< "$cfg" | while IFS=$'\t' read -r p u o; do
-                printf "  ${CYAN}%-24s${NC} %-40s ${DIM}%s${NC}\n" "$p" "$u" "$o"
-            done
+            ] | @tsv' <<< "$cfg")
+            while IFS=$'\t' read -r p u o; do
+                tbl_row "${CYAN}${p}${NC}" "$u" "${DIM}${o}${NC}"
+            done <<< "$rows"
+            tbl_print
         fi
         if [[ "$(jq -r '.redirect.enabled // false' <<< "$cfg")" == "true" ]]; then
             echo -e "\n  ${DIM}The app redirects everything else to $(jq -r '.redirect.to' <<< "$cfg")${NC}"

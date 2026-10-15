@@ -92,17 +92,21 @@ _ini_key_deny_reason() { _ini_key_denied | awk -F'|' -v k="$1" '$1 == k { print 
 
 _ini_keys() {
     echo -e "\n${BOLD}Settable PHP settings${NC}"
-    local line k t d
+    local k t d
+    tbl_start
     while IFS='|' read -r k t d; do
         [[ -n "$k" ]] || continue
-        printf "  ${CYAN}%-34s${NC} ${DIM}%-5s${NC} %s\n" "$k" "$t" "$d"
+        tbl_row "${CYAN}${k}${NC}" "${DIM}${t}${NC}" "$d"
     done < <(_ini_key_catalog)
+    tbl_print
     echo ""
     echo -e "${BOLD}Not settable here${NC} ${DIM}(managed by Cipi or unsafe to expose)${NC}"
+    tbl_start
     while IFS='|' read -r k d; do
         [[ -n "$k" ]] || continue
-        printf "  ${DIM}%-34s %s${NC}\n" "$k" "$d"
+        tbl_row "${DIM}${k}" "${d}${NC}"
     done < <(_ini_key_denied)
+    tbl_print
     echo ""
 }
 
@@ -248,7 +252,8 @@ _ini_list() {
     [[ -z "$ver" ]] && { error "No PHP installation found under /etc/php"; exit 1; }
 
     echo -e "\n${BOLD}PHP settings${NC} ${DIM}— PHP ${ver}${app:+, app '${app}'}${NC}"
-    printf "  ${BOLD}%-34s %-14s %s${NC}\n" "SETTING" "VALUE" "SET BY"
+    tbl_start
+    tbl_head "SETTING" "VALUE" "SET BY"
     local k t d val
     while IFS='|' read -r k t d; do
         [[ -n "$k" ]] || continue
@@ -257,8 +262,9 @@ _ini_list() {
         local col="$NC"
         [[ "$_INI_SOURCE" == app* ]] && col="$CYAN"
         [[ "$_INI_SOURCE" == "global" ]] && col="$GREEN"
-        printf "  %-34s ${col}%-14s${NC} ${DIM}%s${NC}\n" "$k" "${val:-—}" "$_INI_SOURCE"
+        tbl_row "$k" "${col}${val:-—}${NC}" "${DIM}${_INI_SOURCE}${NC}"
     done < <(_ini_key_catalog)
+    tbl_print
     echo ""
     if [[ -n "$app" ]]; then
         echo -e "  ${DIM}Change for this app only: ${CYAN}cipi ini set <key>=<value> --app=${app}${NC}"

@@ -193,7 +193,9 @@ _disk_report() {
     echo ""
     echo -e "  ${BOLD}Server disk${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    printf "  ${BOLD}%-22s %12s %12s %12s %7s${NC}\n" "MOUNT" "SIZE" "USED" "FREE" "USE"
+    tbl_start
+    tbl_align l r r r r
+    tbl_head "MOUNT" "SIZE" "USED" "FREE" "USE"
     local fs_mount fs_size fs_used fs_free fs_cap color
     while read -r fs_size fs_used fs_free fs_cap fs_mount; do
         [[ -n "$fs_mount" ]] || continue
@@ -202,21 +204,23 @@ _disk_report() {
             if   [[ "${fs_cap%\%}" -ge 90 ]]; then color="$RED"
             elif [[ "${fs_cap%\%}" -ge 80 ]]; then color="$YELLOW"; fi
         fi
-        printf "  %-22s %12s %12s %12s ${color}%7s${NC}\n" \
-            "$fs_mount" "$(_disk_h "$fs_size")" "$(_disk_h "$fs_used")" "$(_disk_h "$fs_free")" "$fs_cap"
+        tbl_row "$fs_mount" "$(_disk_h "$fs_size")" "$(_disk_h "$fs_used")" "$(_disk_h "$fs_free")" "${color}${fs_cap}${NC}"
     done < <(df -Pkl -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs 2>/dev/null \
                 | awk 'NR > 1 {print $2, $3, $4, $5, $6}')
+    tbl_print
 
     echo ""
     echo -e "  ${BOLD}Apps (${n})${NC} ${DIM}— % of the $(_disk_gb "$size_kb") GB on ${mount}${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     local over=0
+    tbl_start
+    tbl_align l r r r r l
     if [[ "$n" -eq 0 ]]; then
-        echo -e "  ${DIM}No apps yet${NC}"
+        tbl_line "${DIM}No apps yet${NC}"
     else
         local warn lpct ltext
         warn=$(_disk_limit_warn)
-        printf "  ${BOLD}%-22s %12s %12s %12s %7s  %s${NC}\n" "APP" "FILES" "DATABASE" "TOTAL" "DISK" "LIMIT"
+        tbl_head "APP" "FILES" "DATABASE" "TOTAL" "DISK" "LIMIT"
         while IFS='|' read -r t app files_kb db_kb limit; do
             [[ -n "$app" ]] || continue
             if [[ -z "$limit" ]]; then
@@ -232,15 +236,14 @@ _disk_report() {
                     ltext="${limit} GB (${lpct}%)"
                 fi
             fi
-            printf "  %-22s %12s %12s ${CYAN}%12s${NC} %6s%%  %b\n" \
-                "$app" "$(_disk_h "$files_kb")" "$(_disk_h "$db_kb")" "$(_disk_h "$t")" "$(_disk_pct "$t" "$size_kb")" "$ltext"
+            tbl_row "$app" "$(_disk_h "$files_kb")" "$(_disk_h "$db_kb")" "${CYAN}$(_disk_h "$t")${NC}" \
+                "$(_disk_pct "$t" "$size_kb")%" "$ltext"
         done <<< "$rows"
-        echo "  ─────────────────────────────────────────────────────────────────────────────────────"
-        printf "  ${BOLD}%-22s %12s %12s %12s %6s%%${NC}\n" \
-            "All apps" "" "" "$(_disk_h "$apps_kb")" "$(_disk_pct "$apps_kb" "$size_kb")"
+        tbl_rule
+        tbl_row "${BOLD}All apps${NC}" "" "" "${BOLD}$(_disk_h "$apps_kb")${NC}" "${BOLD}$(_disk_pct "$apps_kb" "$size_kb")%${NC}"
     fi
-    printf "  %-22s %12s %12s %12s %6s%%\n" \
-        "Everything else" "" "" "$(_disk_h "$other_kb")" "$(_disk_pct "$other_kb" "$size_kb")"
+    tbl_row "Everything else" "" "" "$(_disk_h "$other_kb")" "$(_disk_pct "$other_kb" "$size_kb")%"
+    tbl_print
     echo -e "  ${DIM}Everything else: system, packages, logs, local backups, other databases.${NC}"
     echo -e "  ${DIM}Every database: cipi disk db · Limit: cipi app limits <app> --disk=<GB>|none (alerts, blocks nothing)${NC}"
     if [[ "$over" -gt 0 ]]; then
@@ -409,17 +412,19 @@ _disk_db_report() {
         echo ""
         echo -e "  ${BOLD}${label}${NC}"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        tbl_start
+        tbl_align l r r
         if grep -q "^row|${engine}|" <<< "$lines"; then
-            printf "  ${BOLD}%-36s %12s %14s${NC}\n" "$name_head" "$items_head" "SIZE"
+            tbl_head "$name_head" "$items_head" "SIZE"
         fi
         while IFS='|' read -r kind e name kb items; do
             [[ "$e" == "$engine" ]] || continue
             case "$kind" in
                 row)
                     if [[ -n "$kb" ]]; then
-                        printf "  %-36s %12s ${CYAN}%11s MB${NC}\n" "$name" "$items" "$(_disk_mb "$kb")"
+                        tbl_row "$name" "$items" "${CYAN}$(_disk_mb "$kb") MB${NC}"
                     else
-                        printf "  %-36s %12s ${DIM}%14s${NC}\n" "$name" "$items" "—"
+                        tbl_row "$name" "$items" "${DIM}—${NC}"
                     fi
                     ;;
                 sum)
@@ -427,13 +432,14 @@ _disk_db_report() {
                         memory)  name="Memory in use" ;;
                         on_disk) name="On disk, whole engine" ;;
                     esac
-                    printf "  ${DIM}%-36s %12s %11s MB${NC}\n" "$name" "" "$(_disk_mb "$kb")"
+                    tbl_row "${DIM}${name}${NC}" "" "${DIM}$(_disk_mb "$kb") MB${NC}"
                     ;;
                 note)
-                    echo -e "  ${YELLOW}${name}${NC}"
+                    tbl_line "${YELLOW}${name}${NC}"
                     ;;
             esac
         done <<< "$lines"
+        tbl_print
     done
     echo ""
     echo -e "  ${DIM}MariaDB and PostgreSQL: one size per database. Valkey only knows the keys of each${NC}"

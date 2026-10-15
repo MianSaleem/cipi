@@ -43,7 +43,6 @@ The app-created mail reports `Repository access` and `Build`.
 - **A profile names any of them**: `--dest=local,s3,offsite`; in `cipi.yml`, `destinations: [s3, offsite]`. A name not configured on the server is refused by `profile add/edit` and blocks the `cipi.yml` plan, with the command to run.
 - **Every run uploads the same layout** (`cipi/<profile>/<timestamp>/`) to each bucket, with the credentials of each. Retention deletes a run from every destination that holds it; `cipi backup list` shows on which it is; `verify` and `fetch` take the first destination that has the run when there is no local copy; orphaned archives are pruned on every bucket. A failed upload names the destination (`dest:offsite`).
 - **The existing bucket is the default.** It stays in the top-level keys of `backup.json`, is `s3` in every profile, and keeps the credentials `cipi backup configure` wrote to `/root/.aws`. Named destinations live under `s3_destinations` and hand their keys to the AWS CLI per call. A server configured before this release carries on unchanged; `cipi backup configure` keeps the named destinations it finds, and `cipi backup status` lists them. `cipi help backup` and tab-completion know the commands.
-- **`cipi backup profile list` lines up.** Its columns had fixed widths, so a profile name longer than 16 characters (`cernuscoinsieme-db-quarterly`) or a list of destinations pushed the rest of the row out of line. The widths now follow the longest value in each column.
 
 ### Fixed — a PostgreSQL restore that failed was reported as done
 
@@ -64,6 +63,15 @@ The `cron:` validator of `cipi.yml` (`crons:` and `backup.profiles[].cron`) allo
 - The expression is stored with one space between fields, so the crontab line Cipi writes always reads the same as the one it compares against on the next `cipi yml plan`.
 
 No migration: `crontab` itself refused a block containing such a line, so no installed app carries one.
+
+### Fixed — lists lose their columns with long names
+
+Every list printed its columns at fixed widths, sized for short values. An app name can be 32 characters, a backup profile `cernuscoinsieme-db-quarterly`, a database 64, a domain or a proxy upstream much more: the value pushed the rest of its row out of line, and the table no longer read as one.
+
+- **Columns now take the width of their longest value**, the header included, with two spaces between them. Colour codes do not count towards the width, numeric columns of `cipi disk` stay right-aligned, and nothing is padded after the last column.
+- **The lists that changed**: `cipi app list`, `cipi backup status`, `cipi backup profile list`, `cipi backup destination list`, `cipi db list`, `cipi disk` and `cipi disk db`, `cipi deploy <app> --audit`, `cipi git status`, `cipi ini list` and `cipi ini keys`, `cipi redirect list` and `cipi proxy list`, `cipi search list`, `cipi ssh apps`, `cipi ssl status` and `cipi ssl dns list`, `cipi sync list`, `cipi worker list`, `cipi health list`, `cipi notifications channel list`, and the account and config-file tables of the `cipi compliance report` evidence.
+- One shared helper does it (`lib/table.sh`, loaded by `common.sh`). The lists built on fixed catalogs — notification triggers, monitor checks, compliance controls, token abilities, services — already fit their columns and are unchanged.
+- The panel API parses `cipi db list` with any amount of whitespace between columns, so it reads the new layout as before. `cipi app list` loses the line of `━` under its header; the header is bold.
 
 No migration for this release: a server configured before it keeps working as it is.
 

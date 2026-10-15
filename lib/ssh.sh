@@ -533,20 +533,22 @@ _ssh_apps_list() {
     if [[ -z "$users" ]]; then
         echo -e "  ${DIM}No apps yet${NC}"
     else
-        printf "  ${BOLD}%-24s %s${NC}\n" "APP" "ACCESS"
+        tbl_start
+        tbl_head "APP" "ACCESS"
         while IFS= read -r u; do
             [[ -n "$u" ]] || continue
             if _ssh_apps_in_group "$u"; then
                 if [[ "$block" == true ]]; then
-                    printf "  %-24s ${RED}○ disabled${NC}\n" "$u"
+                    tbl_row "$u" "${RED}○ disabled${NC}"
                 else
-                    printf "  %-24s ${GREEN}● enabled${NC}\n" "$u"
+                    tbl_row "$u" "${GREEN}● enabled${NC}"
                     stale="${stale} ${u}"
                 fi
             else
-                printf "  %-24s ${GREEN}● enabled${NC}\n" "$u"
+                tbl_row "$u" "${GREEN}● enabled${NC}"
             fi
         done <<< "$users"
+        tbl_print
     fi
     echo ""
     echo -e "  New apps: ${CYAN}$(_ssh_apps_default)${NC}"

@@ -1017,7 +1017,8 @@ _search_list() {
         echo -e "  ${DIM}none — enable one with: cipi search enable <app>${NC}\n"
         return 0
     fi
-    printf "  ${BOLD}%-18s %-16s %-8s %s${NC}\n" "APP" "PREFIX" "INDEXES" "KEY UID"
+    tbl_start
+    tbl_head "APP" "PREFIX" "INDEXES" "KEY UID"
     local app prefix uid count
     for app in $apps; do
         prefix=$(_search_app_prefix "$app")
@@ -1027,8 +1028,9 @@ _search_list() {
             count=$(_search_list_indexes "$prefix" | grep -c . || true)
             [[ -z "$count" ]] && count=0
         fi
-        printf "  %-18s %-16s %-8s ${DIM}%s${NC}\n" "$app" "$prefix" "$count" "$uid"
+        tbl_row "$app" "$prefix" "$count" "${DIM}${uid}${NC}"
     done
+    tbl_print
     echo ""
 }
 

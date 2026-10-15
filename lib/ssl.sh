@@ -174,13 +174,15 @@ _ssl_dns_list() {
         echo -e "  ${DIM}none — add one with: cipi ssl dns set [--name=NAME] --token=TOKEN${NC}\n"
         return 0
     fi
-    printf "  ${BOLD}%-20s %s${NC}\n" "ACCOUNT" "CERTIFICATES"
+    tbl_start
+    tbl_head "ACCOUNT" "CERTIFICATES"
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue
         file=$(_ssl_dns_creds_file "$name")
         certs=$(_ssl_dns_certs_using "$file" | tr '\n' ' ')
-        printf "  %-20s %s\n" "$name" "${certs:-—}"
+        tbl_row "$name" "${certs:-—}"
     done <<< "$accounts"
+    tbl_print
     echo ""
     echo -e "  ${DIM}Issue with an account: cipi ssl install <app> --dns=cloudflare --account=NAME [--wildcard]${NC}"
     echo -e "  ${DIM}Tokens are stored root-only and never shown.${NC}"
@@ -561,6 +563,7 @@ _ssl_status() {
         return
     fi
     local name
+    tbl_start
     for name in /etc/letsencrypt/live/*/; do
         [[ -d "$name" ]] || continue
         local cn; cn=$(basename "$name")
@@ -574,8 +577,9 @@ _ssl_status() {
             if [[ "$cf" == "$SSL_DNS_DEFAULT_CREDS" ]]; then via="default"; else via="${cf##*/}"; via="${via%.ini}"; fi
             via="  ${DIM}dns-01 cloudflare:${via}${NC}"
         fi
-        printf "  %-40s %s%b\n" "$cn" "$expiry" "$via"
+        tbl_row "$cn" "${expiry}${via}"
     done
+    tbl_print
     echo ""
     _ssl_status_apps
 }
@@ -588,10 +592,11 @@ _ssl_status_apps() {
     apps=$(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
     [[ -n "$apps" ]] || return 0
     echo -e "${BOLD}Apps${NC}"
+    tbl_start
     while IFS= read -r app; do
         [[ -n "$app" ]] || continue
         if ! files=$(app_tls_files "$app"); then
-            printf "  %-20s ${DIM}%s${NC}\n" "$app" "HTTP only — cipi ssl install ${app}"
+            tbl_row "$app" "${DIM}HTTP only — cipi ssl install ${app}${NC}"
             continue
         fi
         if [[ "$(app_get "$app" ssl_origin_ca)" == "true" && "$files" == "${CIPI_ORIGIN_CERT_DIR}/"* ]]; then
@@ -603,10 +608,11 @@ _ssl_status_apps() {
         fi
         uncovered=$(_ssl_uncovered_names "$app" | tr '\n' ' ')
         if [[ -n "$uncovered" ]]; then
-            printf "  %-20s %s  ${YELLOW}not covered: %s${NC}\n" "$app" "$src" "${uncovered% }"
+            tbl_row "$app" "${src}  ${YELLOW}not covered: ${uncovered% }${NC}"
         else
-            printf "  %-20s %s  ${GREEN}✓${NC}\n" "$app" "$src"
+            tbl_row "$app" "${src}  ${GREEN}✓${NC}"
         fi
     done <<< "$apps"
+    tbl_print
     echo ""
 }

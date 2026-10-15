@@ -260,14 +260,17 @@ _sync_list() {
     printf "  %-14s ${CYAN}%s${NC}\n" "Storage" "$with_storage"
 
     echo -e "\n  ${BOLD}Apps${NC}"
-    printf "  ${BOLD}%-14s %-28s %-6s %-8s %s${NC}\n" "APP" "DOMAIN" "PHP" "DB" "STORAGE"
-
-    jq -r 'to_entries[]|"\(.key)\t\(.value.domain)\t\(.value.php)"' "${dir}/config/apps.json" 2>/dev/null | while IFS=$'\t' read -r a d p; do
-        local has_db="—" has_st="—"
+    tbl_start
+    tbl_head "APP" "DOMAIN" "PHP" "DB" "STORAGE"
+    local a d p has_db has_st
+    while IFS=$'\t' read -r a d p; do
+        [[ -n "$a" ]] || continue
+        has_db="—"; has_st="—"
         [[ -f "${dir}/apps/${a}/db.sql.gz" ]] && has_db="${GREEN}yes${NC}"
         [[ -f "${dir}/apps/${a}/storage.tar.gz" ]] && has_st="${GREEN}yes${NC}"
-        printf "  %-14s %-28s %-6s %-8b %b\n" "$a" "$d" "$p" "$has_db" "$has_st"
-    done
+        tbl_row "$a" "$d" "$p" "$has_db" "$has_st"
+    done < <(jq -r 'to_entries[]|"\(.key)\t\(.value.domain)\t\(.value.php)"' "${dir}/config/apps.json" 2>/dev/null)
+    tbl_print
 
     if [[ -f "${dir}/config/databases.json" ]] && [[ $(jq 'length' "${dir}/config/databases.json" 2>/dev/null) -gt 0 ]]; then
         echo -e "\n  ${BOLD}Standalone Databases${NC}"

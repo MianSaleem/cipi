@@ -754,6 +754,11 @@ read_input() {
     read -r input; printf -v "$var" '%s' "${input:-$default}"
 }
 
+# Tables with columns sized from the data (tbl_start, tbl_row, tbl_print …).
+# Loaded from next to this file, so it is there whatever CIPI_LIB says.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/table.sh"
+
 # Numbered menu with the default marked. Accepts the number or the value
 # itself; anything else asks again, an empty answer takes the default. Without
 # a terminal (panel API, a script) the default is taken without printing.

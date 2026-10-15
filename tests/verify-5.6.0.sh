@@ -432,6 +432,64 @@ grep -q 'destination|destinations|dest) _bk_destination_command' "${LIB}/backup.
     && pass "cipi backup destination is dispatched, in help and completion" || fail "destination wiring"
 grep -q '_aws_s3 cp "${tmp}/"' "${LIB}/backup.sh" && fail "the run still uploads with the default profile only" || pass "no upload bypasses the destination"
 
+# ── tables: columns sized from the data ──────────────────────
+echo "-- tables: columns follow the longest value"
+bash -n "${LIB}/table.sh" && pass "table.sh parses" || fail "table.sh does not parse"
+grep -q 'source "$(dirname "${BASH_SOURCE\[0\]}")/table.sh"' "${LIB}/common.sh" \
+    && pass "common.sh loads table.sh from next to itself" || fail "common.sh does not load table.sh"
+cat > "${TMP}/tbl.sh" <<EOF
+RED=\$(printf '\e[31m'); NC=\$(printf '\e[0m'); BOLD=\$(printf '\e[1m')
+source "${LIB}/table.sh"
+tbl_start; tbl_align l r l
+tbl_head NAME SIZE NOTE
+tbl_row "cernuscoinsieme-db-quarterly" "\${RED}12 MB\${NC}" "x"
+tbl_row "db" "1.5 GB" ""
+tbl_rule
+tbl_line "a free line that is much longer than the table and is not measured"
+tbl_print
+EOF
+out=$(bash "${TMP}/tbl.sh" | sed $'s/\x1b\\[[0-9;]*m//g')
+l1=$(sed -n 1p <<< "$out"); l2=$(sed -n 2p <<< "$out"); l3=$(sed -n 3p <<< "$out"); l4=$(sed -n 4p <<< "$out")
+[[ "$l1" == "  NAME                            SIZE  NOTE" ]] && [[ "$l2" == "  cernuscoinsieme-db-quarterly   12 MB  x" ]] \
+    && [[ "$l3" == "  db                            1.5 GB" ]] \
+    && pass "widths from the longest value, colours not counted, right-aligned column" || fail "table layout: $(printf '%s|' "$l1" "$l2" "$l3")"
+[[ "$l4" == "  $(printf '─%.0s' $(seq 1 $(( ${#l1} - 2 ))))" ]] && pass "a rule spans the table" || fail "rule: ${l4}"
+! grep -q ' $' <<< "$out" && pass "no trailing spaces" || fail "trailing spaces: $(grep -n ' $' <<< "$out")"
+grep -q '^  a free line that is much longer' <<< "$out" && pass "free lines are printed as they are" || fail "free line"
+
+# app list with a 32-character app name and a long domain
+cat > "${TMP}/al.sh" <<EOF
+RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+CIPI_LIB="${LIB}"
+source "${LIB}/table.sh"
+eval "\$(bash -c 'CIPI_LIB="\$1"; source "\$2" >/dev/null 2>&1; declare -f app_list' _ "${LIB}" "${LIB}/app.sh")"
+vault_read(){ cat "${TMP}/al-apps.json"; }
+info(){ :; }; supervisorctl(){ :; }; systemctl(){ :; }
+app_list
+EOF
+cat > "${TMP}/al-apps.json" <<'EOF'
+{"cernuscoinsieme2026landingpages":{"domain":"landing.cernuscoinsieme-associazione.example.it","php":"8.4","created_at":"2026-10-03T10:00:00Z"},
+ "shop":{"domain":"shop.test","php":"8.5","created_at":"2026-10-04T10:00:00Z","octane":"frankenphp"}}
+EOF
+out=$(bash "${TMP}/al.sh" 2>&1 | sed 's/●/*/g')   # awk counts bytes; ● is three
+c1=$(awk '/cernuscoinsieme2026landingpages/ { print index($0, "8.4") }' <<< "$out")
+c2=$(awk '/ shop / { print index($0, "8.5") }' <<< "$out")
+ch=$(awk '/APP/ { print index($0, "PHP") }' <<< "$out")
+[[ -n "$c1" && "$c1" == "$c2" && "$c1" == "$ch" ]] && pass "app list: a 32-character name and a long domain keep the columns in line" \
+    || fail "app list alignment (${ch}/${c1}/${c2}): ${out}"
+
+# no table left on fixed widths where a value can be longer than its column
+fixed=0
+for pat in '"APP" "DOMAIN" "PHP" "RUNTIME"' '"MOUNT" "SIZE" "USED"' '"APP" "FILES" "DATABASE" "TOTAL"' \
+           '"ENGINE" "DATABASE" "USER" "SIZE"' '"TIME (UTC)" "EVENT"' '"APP" "PROVIDER" "DEPLOY KEY"' \
+           '"SETTING" "VALUE" "SET BY"' '"CODE" "MATCH" "FROM" "TO"' '"PREFIX" "UPSTREAM" "OPTIONS"' \
+           '"APP" "PREFIX" "INDEXES"' '"APP" "ACCESS"' '"ACCOUNT" "CERTIFICATES"' '"APP" "DOMAIN" "PHP" "DB"' \
+           '"PROGRAM" "QUEUE" "PROCS"' '"PROFILE" "SCOPE" "SCHEDULE"'; do
+    hit=$(grep -rnF "$pat" "${LIB}" | grep -v 'tbl_head' || true)
+    [[ -n "$hit" ]] && { fixed=1; echo "    fixed-width header: ${hit}" >&2; }
+done
+[[ $fixed -eq 0 ]] && pass "every list with variable values uses the table helper" || fail "fixed-width tables left"
+
 # ── cipi.yml ─────────────────────────────────────────────────
 echo "-- cipi.yml: named destinations"
 yml_ok() {

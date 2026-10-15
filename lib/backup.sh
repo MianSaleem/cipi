@@ -431,10 +431,9 @@ _bk_profile_list() {
 
     local state; state=$(_bk_state)
 
-    # Rows first, then the widths: profile names go up to 32 characters and a
-    # profile may list several destinations, so fixed columns break the table.
-    local -a r_p=() r_scope=() r_cron=() r_dest=() r_ret=() r_last=() r_col=() r_flag=()
-    local w_p=7 w_scope=5 w_cron=8 w_dest=4 w_ret=9
+    echo -e "\n${BOLD}Backup profiles${NC}"
+    tbl_start
+    tbl_head "PROFILE" "SCOPE" "SCHEDULE" "DEST" "RETENTION" "LAST RUN"
     local p scope cron dest ret enc last status col flag
     while IFS= read -r p; do
         [[ -n "$p" ]] || continue
@@ -451,24 +450,9 @@ _bk_profile_list() {
         col="$NC"
         [[ "$status" == "error" ]] && col="$RED"
         [[ "$status" == "ok" ]] && col="$GREEN"
-        r_p+=("$p"); r_scope+=("$scope"); r_cron+=("$cron"); r_dest+=("$dest")
-        r_ret+=("$ret"); r_last+=("$last"); r_col+=("$col"); r_flag+=("$flag")
-        (( ${#p} > w_p ))         && w_p=${#p}
-        (( ${#scope} > w_scope )) && w_scope=${#scope}
-        (( ${#cron} > w_cron ))   && w_cron=${#cron}
-        (( ${#dest} > w_dest ))   && w_dest=${#dest}
-        (( ${#ret} > w_ret ))     && w_ret=${#ret}
+        tbl_row "${CYAN}${p}${NC}" "$scope" "$cron" "$dest" "$ret" "${col}${last}${NC}${flag}"
     done <<< "$names"
-
-    echo -e "\n${BOLD}Backup profiles${NC}"
-    printf "  ${BOLD}%-*s  %-*s  %-*s  %-*s  %-*s  %s${NC}\n" \
-        "$w_p" "PROFILE" "$w_scope" "SCOPE" "$w_cron" "SCHEDULE" "$w_dest" "DEST" "$w_ret" "RETENTION" "LAST RUN"
-    local i
-    for i in "${!r_p[@]}"; do
-        printf "  ${CYAN}%-*s${NC}  %-*s  %-*s  %-*s  %-*s  ${r_col[$i]}%s${NC}%b\n" \
-            "$w_p" "${r_p[$i]}" "$w_scope" "${r_scope[$i]}" "$w_cron" "${r_cron[$i]}" \
-            "$w_dest" "${r_dest[$i]}" "$w_ret" "${r_ret[$i]}" "${r_last[$i]}" "${r_flag[$i]}"
-    done
+    tbl_print
     echo ""
     echo -e "  ${DIM}Details: cipi backup profile show <name>${NC}"
     echo ""
@@ -1510,10 +1494,11 @@ _bk_status() {
     local bucket ep
     bucket=$(echo "$cfg" | jq -r '.bucket // ""')
     ep=$(echo "$cfg" | jq -r '.endpoint_url // ""')
+    tbl_start
     if [[ -n "$bucket" ]]; then
-        printf "  %-14s ${GREEN}configured${NC}  s3://%s%s\n" "S3 (s3)" "$bucket" "${ep:+  (${ep})}"
+        tbl_row "S3 (s3)" "${GREEN}configured${NC}" "s3://${bucket}${ep:+  (${ep})}"
     else
-        printf "  %-14s ${DIM}not configured${NC}\n" "S3 (s3)"
+        tbl_row "S3 (s3)" "${DIM}not configured${NC}"
     fi
     # Named destinations (cipi backup destination add)
     local dn dj
@@ -1521,14 +1506,15 @@ _bk_status() {
         [[ -n "$dn" && "$dn" != "s3" ]] || continue
         dj=$(_bk_s3_json "$dn")
         ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
-        printf "  %-14s ${GREEN}configured${NC}  s3://%s%s\n" "$dn" "$(echo "$dj" | jq -r '.bucket // ""')" "${ep:+  (${ep})}"
+        tbl_row "$dn" "${GREEN}configured${NC}" "s3://$(echo "$dj" | jq -r '.bucket // ""')${ep:+  (${ep})}"
     done < <(_bk_s3_names)
-    printf "  %-14s %s\n" "Local" "$(_bk_local_root)"
+    tbl_row "Local" "$(_bk_local_root)"
     if [[ -f "$BACKUP_KEY_FILE" ]]; then
-        printf "  %-14s ${GREEN}present${NC}      %s\n" "Encryption key" "$BACKUP_KEY_FILE"
+        tbl_row "Encryption key" "${GREEN}present${NC}" "$BACKUP_KEY_FILE"
     else
-        printf "  %-14s ${DIM}not created${NC}\n" "Encryption key"
+        tbl_row "Encryption key" "${DIM}not created${NC}"
     fi
+    tbl_print
     _bk_profile_list
     _bk_check_stale --report
 }
@@ -1886,15 +1872,17 @@ _bk_destination_list() {
     _bk_require_config
     local names; names=$(_bk_s3_names)
     echo -e "\n${BOLD}Backup destinations${NC}"
-    printf "  ${CYAN}%-14s${NC} %s\n" "local" "$(_bk_local_root)"
+    tbl_start
+    tbl_row "${CYAN}local${NC}" "$(_bk_local_root)"
     local dn dj b ep used
     while IFS= read -r dn; do
         [[ -n "$dn" ]] || continue
         dj=$(_bk_s3_json "$dn")
         b=$(echo "$dj" | jq -r '.bucket // ""'); ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
         used=$(_bk_dest_profiles "$dn" | paste -sd, -)
-        printf "  ${CYAN}%-14s${NC} s3://%s%s%s%b\n" "$dn" "$b" "${ep:+  (${ep})}" "$([[ "$dn" == "s3" ]] && echo "  [default]")" "${used:+  ${DIM}← ${used}${NC}}"
+        tbl_row "${CYAN}${dn}${NC}" "s3://${b}${ep:+  (${ep})}$([[ "$dn" == "s3" ]] && echo "  [default]")${used:+  ${DIM}← ${used}${NC}}"
     done <<< "$names"
+    tbl_print
     echo ""
     if [[ -z "$names" ]]; then
         echo -e "  ${DIM}No S3 destination yet: cipi backup configure (the default bucket) or cipi backup destination add <name>${NC}"

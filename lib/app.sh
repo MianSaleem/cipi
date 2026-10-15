@@ -762,13 +762,14 @@ app_list() {
     if [[ $(echo "$_aj" | jq 'length') -eq 0 ]]; then
         info "No apps. Create one: cipi app create"; return
     fi
-    printf "\n${BOLD}%-14s %-28s %-6s %-10s %s${NC}\n" "APP" "DOMAIN" "PHP" "RUNTIME" "CREATED"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    tbl_start
+    tbl_head "" "APP" "DOMAIN" "PHP" "RUNTIME" "CREATED"
     # Every field is emitted non-empty: tab is IFS whitespace, so `read` would
     # fold an empty column into the next one — an app without Octane then read
     # "-" as its Octane server and was listed as octane, with a red dot.
-    echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain // "-")\t\(.value.php // "-")\t\(.value.created_at // "-")\t\(.value.suspended // "false")\t\(if ((.value.octane // "") | tostring) == "" then "-" else .value.octane end)\t\(if .value.runtime == "node" then "node-" + .value.node_mode else "-" end)"' \
-        | while IFS=$'\t' read -r a d p c s o nd; do
+    local a d p c s o nd
+    while IFS=$'\t' read -r a d p c s o nd; do
         [[ "$o" == "-" ]] && o=""
         local st="${GREEN}●${NC}"
         if [[ "$nd" == "node-ssr" ]]; then
@@ -783,8 +784,10 @@ app_list() {
         [[ "$s" == "true" ]] && st="${YELLOW}●${NC}"
         local suffix=""; [[ "$s" == "true" ]] && suffix=" ${YELLOW}(suspended)${NC}"
         local runtime="fpm"; [[ -n "$o" ]] && runtime="octane"; [[ "$nd" == node-* ]] && runtime="$nd"
-        printf "  ${st} %-12s %-28s %-6s %-10s %s${suffix}\n" "$a" "$d" "$p" "$runtime" "${c:0:10}"
-    done; echo ""
+        tbl_row "$st" "$a" "$d" "$p" "$runtime" "${c:0:10}${suffix}"
+    done < <(echo "$_aj" | jq -r 'to_entries[]|"\(.key)\t\(.value.domain // "-")\t\(.value.php // "-")\t\(.value.created_at // "-")\t\(.value.suspended // "false")\t\(if ((.value.octane // "") | tostring) == "" then "-" else .value.octane end)\t\(if .value.runtime == "node" then "node-" + .value.node_mode else "-" end)"')
+    tbl_print
+    echo ""
 }
 
 # ── SHOW ──────────────────────────────────────────────────────

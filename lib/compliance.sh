@@ -404,7 +404,8 @@ _cmp_check_accounts() {
 
     local user uid shell home pw groups kind last logins empty=""
     {
-        printf '%-20s %-6s %-8s %-10s %-20s %s\n' USER UID TYPE PASSWORD LAST_LOGIN GROUPS
+        tbl_start
+        tbl_row USER UID TYPE PASSWORD LAST_LOGIN GROUPS
         while IFS=: read -r user _ uid _ _ home shell; do
             [[ "$uid" =~ ^[0-9]+$ ]] || continue
             (( uid == 0 || uid >= 1000 )) || continue
@@ -424,8 +425,9 @@ _cmp_check_accounts() {
             fi
             last=$(lastlog -u "$user" 2>/dev/null | awk 'NR == 2 { if ($0 ~ /Never logged in/) print "never"; else { $1 = ""; $2 = ""; $3 = ""; sub(/^ +/, ""); print } }')
             groups=$(id -nG "$user" 2>/dev/null | tr ' ' ',')
-            printf '%-20s %-6s %-8s %-10s %-20s %s\n' "$user" "$uid" "$kind" "$pw" "${last:-?}" "$groups"
+            tbl_row "$user" "$uid" "$kind" "$pw" "${last:-?}" "$groups"
         done < /etc/passwd
+        tbl_print ""
     } > "$(_cmp_ev accounts.txt)" 2>/dev/null || true
     logins=$(( $(wc -l < "$(_cmp_ev accounts.txt)" 2>/dev/null || echo 1) - 1 ))
     if [[ -n "$empty" ]]; then
@@ -569,13 +571,15 @@ _cmp_check_gui_2fa() {
 _cmp_check_secrets() {
     local status=pass detail="" f mode owner enc plain=""
     {
-        printf '%-32s %-5s %-8s %s\n' FILE MODE OWNER ENCRYPTED
+        tbl_start
+        tbl_row FILE MODE OWNER ENCRYPTED
         shopt -s nullglob
         for f in "${CIPI_CONFIG}"/*.json; do
             mode=$(stat -c %a "$f" 2>/dev/null); owner=$(stat -c %U "$f" 2>/dev/null)
             if jq empty "$f" 2>/dev/null; then enc=no; else enc=yes; fi
-            printf '%-32s %-5s %-8s %s\n' "$(basename "$f")" "$mode" "$owner" "$enc"
+            tbl_row "$(basename "$f")" "$mode" "$owner" "$enc"
         done
+        tbl_print ""
         shopt -u nullglob
     } > "$(_cmp_ev config-files.txt)" 2>/dev/null || true
 

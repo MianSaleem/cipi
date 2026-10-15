@@ -1839,11 +1839,14 @@ _git_status() {
         local apps_with_git; apps_with_git=$(vault_read apps.json | jq -r 'to_entries[] | select(.value.git_provider != null) | "\(.key)\t\(.value.git_provider)\t\(.value.git_deploy_key_id // "-")\t\(.value.git_webhook_id // "-")"' 2>/dev/null)
         if [[ -n "$apps_with_git" ]]; then
             echo ""
-            printf "  ${BOLD}%-14s %-12s %-14s %s${NC}\n" "APP" "PROVIDER" "DEPLOY KEY" "WEBHOOK"
-            echo "  ─────────────────────────────────────────────────"
-            echo "$apps_with_git" | while IFS=$'\t' read -r a p dk wh; do
-                printf "  %-14s %-12s %-14s %s\n" "$a" "$p" "$dk" "$wh"
-            done
+            tbl_start
+            tbl_head "APP" "PROVIDER" "DEPLOY KEY" "WEBHOOK"
+            tbl_rule
+            local a p dk wh
+            while IFS=$'\t' read -r a p dk wh; do
+                tbl_row "$a" "$p" "$dk" "$wh"
+            done <<< "$apps_with_git"
+            tbl_print
         fi
     fi
 

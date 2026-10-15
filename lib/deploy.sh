@@ -122,11 +122,13 @@ _deploy_audit_show() {
     if [[ -z "$rows" ]]; then
         echo -e "  ${DIM}No records${NC}\n"; return 0
     fi
-    printf "  ${BOLD}%-20s %-9s %-7s %-10s %-20s %-10s %-15s %s${NC}\n" "TIME (UTC)" "EVENT" "RELEASE" "COMMIT" "ORIGIN" "OPERATOR" "IP" "CLAIMED"
+    tbl_start
+    tbl_head "TIME (UTC)" "EVENT" "RELEASE" "COMMIT" "ORIGIN" "OPERATOR" "IP" "CLAIMED"
     local ts ev rel sha org op ip cl
     while IFS=$'\t' read -r ts ev rel sha org op ip cl; do
-        printf "  %-20s %-9s %-7s %-10s %-20s %-10s %-15s ${DIM}%s${NC}\n" "${ts/T/ }" "$ev" "$rel" "$sha" "$org" "$op" "$ip" "$cl"
+        tbl_row "${ts/T/ }" "$ev" "$rel" "$sha" "$org" "$op" "$ip" "${DIM}${cl}${NC}"
     done <<< "$rows"
+    tbl_print
     echo ""
 }
 

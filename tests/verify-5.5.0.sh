@@ -12,6 +12,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIB="${ROOT}/lib"
+# Shipped code prints tables through lib/table.sh, which common.sh loads.
+export TBL_LIB="${LIB}"
 PASS=0
 FAIL=0
 
@@ -461,7 +463,7 @@ dk() {
         error() { echo "ERROR: $*" >&2; }
         vault_read() { cat "${CIPI_CONFIG}/$1"; }
         _cipi_run_timed() { shift; "$@"; }
-        source "$0"
+        source "${TBL_LIB}/table.sh"; source "$0"
         disk_command "$@"' "${D}/disk.sh" "$@" 2>&1
 }
 out=$(dk); rc=$?
@@ -559,7 +561,7 @@ ddb() {
         if [[ -n "${NOENG:-}" ]]; then
             command() { case "${2:-}" in mariadb|psql|valkey-cli|redis-cli) return 1 ;; *) builtin command "$@" ;; esac; }
         fi
-        source "$0"
+        source "${TBL_LIB}/table.sh"; source "$0"
         disk_command db "$@"' "${LIB}/disk.sh" "$@" 2>&1
 }
 : > "${D}/valkey.calls"
@@ -805,7 +807,7 @@ sa() {
         vault_write() { cat > "${CIPI_CONFIG}/$1"; }
         app_exists() { jq -e --arg a "$1" "has(\$a)" "${CIPI_CONFIG}/apps.json" >/dev/null 2>&1; }
         parse_args() { :; }
-        source "$0"
+        source "${TBL_LIB}/table.sh"; source "$0"
         ssh_command apps "$@"' "${LIB}/ssh.sh" "$@" 2>&1
 }
 out=$(sa); rc=$?
@@ -971,7 +973,7 @@ sl() {   # ssl_command <args…> against the test directory
         certbot_ensure_reload_hook() { :; }
         eval "$(grep -E "^(domain_cert_name|domain_is_wildcard)\(\)" "$1")"
         eval "$(sed -n "/^cert_names_for()/,/^}/p" "$1")"
-        source "$0"; shift
+        source "${TBL_LIB}/table.sh"; source "$0"; shift
         # 5.5.1: the vhost is rewritten by the generator in app.sh (tested in verify-5.5.1.sh).
         _ssl_apply_vhost() { :; }
         "$@"' "${W}/ssl.sh" "${LIB}/common.sh" "$@" 2>&1

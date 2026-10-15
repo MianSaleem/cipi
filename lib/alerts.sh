@@ -260,6 +260,7 @@ _alerts_list() {
         return 0
     fi
     local ch id type enabled url priority target
+    tbl_start
     while IFS= read -r ch; do
         [[ -z "$ch" ]] && continue
         id=$(jq -r '.id' <<<"$ch"); type=$(jq -r '.type' <<<"$ch")
@@ -271,14 +272,15 @@ _alerts_list() {
         else
             target=$(_alert_url_mask "$(jq -r '.url // ""' <<<"$ch")")
         fi
+        local extra=""
+        [[ "$type" == "ntfy" && -n "$priority" && "$priority" != "default" ]] && extra="  ${DIM}priority=${priority}${NC}"
         if [[ "$enabled" == "true" ]]; then
-            printf "  ${GREEN}●${NC} %-14s %-8s %s" "$id" "$type" "$target"
+            tbl_row "${GREEN}●${NC}" "$id" "$type" "${target}${extra}"
         else
-            printf "  ${DIM}○ %-14s %-8s %s${NC}" "$id" "$type" "$target"
+            tbl_row "${DIM}○" "$id" "$type" "${target}${NC}${extra}"
         fi
-        [[ "$type" == "ntfy" && -n "$priority" && "$priority" != "default" ]] && printf "  ${DIM}priority=%s${NC}" "$priority"
-        echo
     done < <(echo "$cfg" | jq -c '.channels[]')
+    tbl_print
     echo ""
     echo -e "  ${DIM}Manage: cipi notifications channel add|remove|enable|disable|test${NC}"
     echo ""
