@@ -10,6 +10,17 @@ No panel, no bloat — so you can focus on what you love: building your applicat
 
 [Website](https://cipi.sh) · [Docs](https://cipi.sh/docs) · [Report a bug](https://github.com/cipi-sh/cipi/issues)
 
+<br>
+
+<a href="https://cipi.sh/docs/gui">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://cipi.sh/img/gui/dashboard-light.webp">
+    <img alt="Cipi control panel: dashboard with three connected servers" src="https://cipi.sh/img/gui/dashboard.webp" width="900">
+  </picture>
+</a>
+
+<sub>The optional web GUI: one login for every Cipi server. The CLI does everything without it.</sub>
+
 </div>
 
 ---
@@ -540,8 +551,8 @@ When you need to manage apps programmatically or integrate with external pipelin
 A self-hosted control panel for operators who prefer a browser over SSH. One login manages any number of Cipi servers through their REST API: register each server with a token, then switch between them from the header on any page.
 
 <picture>
-  <source media="(prefers-color-scheme: light)" srcset="https://cipi.sh/img/gui/dashboard-light.webp">
-  <img alt="Cipi control panel: dashboard with three connected servers" src="https://cipi.sh/img/gui/dashboard.webp">
+  <source media="(prefers-color-scheme: light)" srcset="https://cipi.sh/img/gui/server-overview-light.webp">
+  <img alt="Cipi control panel: server overview" src="https://cipi.sh/img/gui/server-overview.webp">
 </picture>
 
 - **Apps** — create Laravel (PHP-FPM or Octane), Node (SPA, static, SSR) and custom PHP apps; deploy, roll back and unlock; the deploy audit ledger and the `deploy.php` pipeline; domains, SSL, www ↔ apex, whole-app and path redirects, prefix proxies; `.env` with masked secrets, Composer `auth.json`, Artisan and whitelisted commands; basic auth, healthchecks, Meilisearch; logs with live refresh.
@@ -549,6 +560,38 @@ A self-hosted control panel for operators who prefer a browser over SSH. One log
 - **Server** — overview, PHP versions, Node runtimes, database engines, services, healthchecks, monitor, email notifications, SSH keys, packages, Cloudflare Zero Trust and the API IP whitelist.
 - **Jobs** — long operations run on the server; the panel shows their output and lists one-time credentials (SSH and database passwords, deploy key, webhook token) with copy buttons.
 - **Security** — session login with TOTP 2FA, tokens encrypted at rest, nothing installed on the managed servers besides `cipi api`.
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/apps.webp"><img src="https://cipi.sh/img/gui/apps.webp" alt="Apps list in the Cipi control panel"></a><br><sub><b>Apps</b> — Laravel, Node and custom apps; filter, search, deploy from the list</sub></td>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/create-app.webp"><img src="https://cipi.sh/img/gui/create-app.webp" alt="Create app form with the app type picker"></a><br><sub><b>Create</b> — the app type picker, with the same Node presets as the CLI</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/app-deploy.webp"><img src="https://cipi.sh/img/gui/app-deploy.webp" alt="Deploy tab with the deploy audit ledger"></a><br><sub><b>Deploy</b> — deploy, roll back, unlock, the deploy audit and the deploy.php pipeline</sub></td>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/app-env.webp"><img src="https://cipi.sh/img/gui/app-env.webp" alt="Environment editor with masked secrets"></a><br><sub><b>Environment</b> — shared/.env with secrets masked and changed rows highlighted</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/app-routing.webp"><img src="https://cipi.sh/img/gui/app-routing.webp" alt="Routing tab with redirects and proxies"></a><br><sub><b>Routing</b> — whole-app and path redirects, prefix reverse proxies</sub></td>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/app-logs.webp"><img src="https://cipi.sh/img/gui/app-logs.webp" alt="Logs viewer with live refresh"></a><br><sub><b>Logs</b> — nginx, PHP-FPM, Laravel, worker and deploy logs, live</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/databases.webp"><img src="https://cipi.sh/img/gui/databases.webp" alt="Databases page for MariaDB and PostgreSQL"></a><br><sub><b>Databases</b> — MariaDB and PostgreSQL: create, back up, restore, rotate passwords</sub></td>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/server-monitor.webp"><img src="https://cipi.sh/img/gui/server-monitor.webp" alt="Server monitor page"></a><br><sub><b>Monitor</b> — the server checks, their state and the last alert</sub></td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/job-credentials.webp"><img src="https://cipi.sh/img/gui/job-credentials.webp" alt="Job overlay listing one-time credentials"></a><br><sub><b>Jobs</b> — live output, and one-time credentials with copy buttons</sub></td>
+    <td width="50%" valign="top"><a href="https://cipi.sh/img/gui/connections.webp"><img src="https://cipi.sh/img/gui/connections.webp" alt="Connections page with several servers"></a><br><sub><b>Connections</b> — every server with its token; switch from the header</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="https://cipi.sh/img/gui/mobile-apps.webp" alt="Apps on a phone" width="240">
+  <img src="https://cipi.sh/img/gui/mobile-app.webp" alt="App detail on a phone" width="240">
+  <img src="https://cipi.sh/img/gui/mobile-nav.webp" alt="Navigation drawer on a phone" width="240">
+  <br><sub>Light and dark themes follow the system, and the layout adapts to phones.</sub>
+</p>
+
+
 
 Install with **`cipi gui <domain>`** (then `cipi gui ssl`) — requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
 
