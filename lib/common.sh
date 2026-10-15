@@ -754,6 +754,40 @@ read_input() {
     read -r input; printf -v "$var" '%s' "${input:-$default}"
 }
 
+# Numbered menu with the default marked. Accepts the number or the value
+# itself; anything else asks again, an empty answer takes the default. Without
+# a terminal (panel API, a script) the default is taken without printing.
+# Usage: read_choice "<prompt>" "<default>" <var> "value|label" ["value|label" ...]
+read_choice() {
+    local prompt="$1" default="$2" var="$3"; shift 3
+    local -a values=() labels=()
+    local opt i n answer def_idx=1
+    for opt in "$@"; do
+        values+=("${opt%%|*}"); labels+=("${opt#*|}")
+    done
+    n=${#values[@]}
+    [[ -t 0 ]] || { printf -v "$var" '%s' "$default"; return 0; }
+    echo -e "  ${BOLD}${prompt}${NC}"
+    for ((i = 0; i < n; i++)); do
+        local mark=""
+        [[ "${values[$i]}" == "$default" ]] && { mark=" ${DIM}(default)${NC}"; def_idx=$((i + 1)); }
+        printf "    ${CYAN}%d${NC}) %-10s %s%b\n" "$((i + 1))" "${values[$i]}" "${labels[$i]}" "$mark"
+    done
+    while true; do
+        echo -e -n "  ${CYAN}Choice${NC} [${def_idx}]: "
+        read -r answer || answer=""
+        answer="${answer#"${answer%%[![:space:]]*}"}"; answer="${answer%"${answer##*[![:space:]]}"}"
+        [[ -z "$answer" ]] && { printf -v "$var" '%s' "$default"; return 0; }
+        if [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= n )); then
+            printf -v "$var" '%s' "${values[$((answer - 1))]}"; return 0
+        fi
+        for ((i = 0; i < n; i++)); do
+            [[ "${values[$i]}" == "$answer" ]] && { printf -v "$var" '%s' "$answer"; return 0; }
+        done
+        echo -e "  ${YELLOW}Choose 1-${n}${NC}"
+    done
+}
+
 parse_args() {
     for arg in "$@"; do
         case "$arg" in

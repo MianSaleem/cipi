@@ -1552,8 +1552,9 @@ class Validator:
                     s = self.as_str(d, dp)
                     if s is None:
                         continue
-                    if s not in DESTINATIONS:
-                        self.err(dp, "must be one of %s" % ", ".join(sorted(DESTINATIONS)))
+                    if s not in DESTINATIONS and not PROFILE_RE.match(s):
+                        self.err(dp, "must be local, s3 or the name of an S3 destination "
+                                     "(cipi backup destination list)")
                         continue
                     if s not in dests:
                         dests.append(s)
@@ -2135,22 +2136,28 @@ _yml_build_plan() {
     # (the app's backup_profiles) and no longer declares are removed. Profiles
     # made with `cipi backup profile add` are never touched unless declared.
     if echo "$_YML_DATA" | jq -e 'has("backup")' &>/dev/null; then
-        local pname dests needs_s3=false configured=true
+        local pname dests d needs_s3=false configured=true
         _bk_configured || configured=false
         while IFS= read -r pname; do
             [[ -n "$pname" ]] || continue
             dests=$(_yml_backup_destinations "$pname")
-            if grep -qx 's3' <<< "$dests"; then
+            # "s3" is the default bucket; any other name a destination added
+            # with `cipi backup destination add`. Either must exist here.
+            while IFS= read -r d; do
+                [[ -n "$d" && "$d" != "local" ]] || continue
                 needs_s3=true
-                if [[ "$configured" == true ]] && ! _bk_has_s3; then
-                    _YML_BLOCKERS+=("backup profile '${pname}' targets s3 but no bucket is configured — run: cipi backup configure, or use destinations: [local]")
+                [[ "$configured" == true ]] || continue
+                if [[ "$d" == "s3" ]]; then
+                    _bk_has_s3 || _YML_BLOCKERS+=("backup profile '${pname}' targets s3 but no bucket is configured — run: cipi backup configure, or use destinations: [local]")
+                elif ! _bk_s3_exists "$d"; then
+                    _YML_BLOCKERS+=("backup profile '${pname}' targets destination '${d}', which is not configured on this server — run: cipi backup destination add ${d} --bucket=... , or use destinations: [local]")
                 fi
-            fi
+            done <<< "$dests"
         done < <(echo "$_YML_DATA" | jq -r '.backup.profiles[]?.name')
 
         if [[ "$configured" != true ]]; then
             if [[ "$needs_s3" == true ]]; then
-                _YML_BLOCKERS+=("backup profiles target s3 but backup is not configured — run: cipi backup configure (bucket and keys), or use destinations: [local]")
+                _YML_BLOCKERS+=("backup profiles target s3 (or a named S3 destination) but backup is not configured — run: cipi backup configure (bucket and keys), or use destinations: [local]")
             elif echo "$_YML_DATA" | jq -e '(.backup.profiles // []) | length > 0' &>/dev/null; then
                 # Nothing to choose for a copy on this server: the defaults of
                 # `cipi backup configure` with an empty bucket, no profile added.
@@ -4149,7 +4156,8 @@ backup:
       scope: all           # all | files | db
       cron: "0 2 * * *"    # or use \`every:\`
       keep_days: 14
-      destinations: [s3]
+      destinations: [s3]   # local, s3 (the default bucket) and/or a named
+                           # destination: cipi backup destination add offsite
       encrypt: true
 YMLEXAMPLE
 }

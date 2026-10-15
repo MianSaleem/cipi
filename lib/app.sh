@@ -15,7 +15,50 @@ app_create() {
     local db_engine="${ARG_engine:-}"
     local octane_server="" octane_port=""
 
-    # App type: laravel (default) or custom
+    # Wizard, first step: what kind of app. Asked on a terminal when no flag
+    # already says it (--custom, --octane, --node, --framework); the panel API
+    # passes flags and never sees a menu.
+    if [[ -t 0 && "$is_custom" != "true" && -z "${ARG_octane+x}" && -z "${ARG_node+x}" && -z "${ARG_framework:-}" ]]; then
+        local kind
+        read_choice "App type" "laravel" kind \
+            "laravel|Laravel — PHP-FPM or Octane, database, queue worker, scheduler" \
+            "custom|Plain PHP or static site — Git optional (SFTP only without it)" \
+            "spa|Node, client-side app — Vite + React/Vue/Svelte, built and served by nginx" \
+            "static|Node, pre-rendered site — Astro, Nuxt generate, Next export" \
+            "ssr|Node, server-rendered — Next, Nuxt, SvelteKit, Astro, Remix; blue/green deploys"
+        case "$kind" in
+            custom)         is_custom="true" ;;
+            spa|static|ssr) ARG_node="$kind" ;;
+        esac
+        if [[ "$kind" == "laravel" ]]; then
+            local runtime
+            read_choice "Runtime" "fpm" runtime \
+                "fpm|PHP-FPM — a pool per app behind nginx" \
+                "octane|Laravel Octane (FrankenPHP) — long-running workers; needs laravel/octane in the project"
+            [[ "$runtime" == "octane" ]] && ARG_octane="frankenphp"
+        elif [[ "$kind" == "spa" ]]; then
+            local fw
+            read_choice "Framework" "vite" fw \
+                "vite|Vite — React, Vue, Svelte (npm run build → dist)" \
+                "none|Other — npm run build → dist"
+            [[ "$fw" != "none" ]] && ARG_framework="$fw"
+        elif [[ "$kind" == "ssr" ]]; then
+            local fw
+            read_choice "Framework" "next" fw \
+                "next|Next.js" "nuxt|Nuxt" "sveltekit|SvelteKit" "astro|Astro (server output)" "remix|Remix" \
+                "none|Other — npm run build, then a start command of your own"
+            if [[ "$fw" == "none" ]]; then
+                read_input "Start command (a runner and plain arguments)" "npm run start" ARG_start
+            else
+                ARG_framework="$fw"
+            fi
+        elif [[ "$kind" == "static" ]]; then
+            read_input "Build command" "npm run build" ARG_build
+            read_input "Output directory" "dist" ARG_output
+        fi
+    fi
+
+    # App type: laravel (default), custom, or node
     local app_type="laravel"
     [[ "$is_custom" == "true" ]] && app_type="custom"
 
@@ -39,6 +82,26 @@ app_create() {
             error "--node cannot be combined with --custom or --octane"; exit 1; }
         _node_resolve_create_opts || exit 1
         app_type="node"
+    fi
+
+    # Database engine (Laravel only) — chosen right after the type, before the
+    # details. One engine installed: nothing to choose.
+    if [[ "$app_type" == "laravel" ]]; then
+        db_ensure_engine_state
+        local default_engine
+        default_engine=$(db_get_default_engine)
+        if [[ -z "$db_engine" ]]; then
+            local -a _eng_choices=()
+            db_engine_is_installed mariadb && _eng_choices+=("mariadb|MariaDB")
+            db_engine_is_installed pgsql   && _eng_choices+=("pgsql|PostgreSQL")
+            [[ ${#_eng_choices[@]} -eq 0 ]] && { error "No database engine installed"; exit 1; }
+            [[ ${#_eng_choices[@]} -gt 1 ]] && read_choice "Database engine" "$default_engine" db_engine "${_eng_choices[@]}"
+        fi
+        [[ -z "$db_engine" ]] && db_engine="$default_engine"
+        db_engine=$(db_normalize_engine "$db_engine") || { error "Invalid engine. Use: mariadb pgsql"; exit 1; }
+        db_require_engine "$db_engine" >/dev/null || exit 1
+    else
+        db_engine=""
     fi
 
     # Interactive prompts for missing fields
@@ -69,25 +132,20 @@ app_create() {
         read_input "PHP version" "$php_ver" php_ver
     fi
 
-    # Database engine (Laravel only)
+    # Asset build (Laravel): runs inside every deploy after composer install
+    # and before the release goes live — the same setting as
+    # cipi app edit --node-build. Node apps declare theirs as --build; custom
+    # apps have no build step.
+    local node_build="${ARG_node_build:-}"
     if [[ "$app_type" == "laravel" ]]; then
-        db_ensure_engine_state
-        local default_engine
-        default_engine=$(db_get_default_engine)
-        if [[ -z "$db_engine" ]]; then
-            local -a _eng_opts=()
-            db_engine_is_installed mariadb && _eng_opts+=("mariadb")
-            db_engine_is_installed pgsql && _eng_opts+=("pgsql")
-            local engine_opts
-            engine_opts=$(IFS='|'; echo "${_eng_opts[*]}")
-            [[ -z "$engine_opts" ]] && { error "No database engine installed"; exit 1; }
-            read_input "Database engine (${engine_opts})" "$default_engine" db_engine
+        if [[ -z "${ARG_node_build+x}" && -t 0 ]]; then
+            echo -e "  Asset build on every deploy, e.g. ${CYAN}npm ci && npm run build${NC} — empty for none"
+            read_input "Build command" "" node_build
         fi
-        [[ -z "$db_engine" ]] && db_engine="$default_engine"
-        db_engine=$(db_normalize_engine "$db_engine") || { error "Invalid engine. Use: mariadb pgsql"; exit 1; }
-        db_require_engine "$db_engine" >/dev/null || exit 1
-    else
-        db_engine=""
+        _validate_node_build_cmd "$node_build" || {
+            error "Invalid build command. Use npm/npx/yarn/pnpm/bun/node and safe characters only."; exit 1; }
+    elif [[ -n "$node_build" ]]; then
+        error "--node-build is for Laravel apps (Node apps take --build=; custom apps have no build step)"; exit 1
     fi
 
     # Custom app: docroot only (Nginx always uses index.php)
@@ -304,6 +362,18 @@ BASH
         git_setup_repo "$app_user" "$repository" "$url_host" "" "$deploy_key" "skip_webhook"
     fi
 
+    # 3c. Can the app read the repository with that key? Better now than at the
+    # first deploy. On a terminal a refused read on a known forge offers to save
+    # or replace the forge token and registers the key (git.sh).
+    GIT_REPO_ACCESS=""
+    if [[ -n "$repository" ]]; then
+        if [[ "$app_type" == "custom" ]]; then
+            git_verify_repo_access "$app_user" "$repository" "$branch" "$url_host" "" "$deploy_key" "skip_webhook" || true
+        else
+            git_verify_repo_access "$app_user" "$repository" "$branch" "$url_host" "$webhook_token" "$deploy_key" || true
+        fi
+    fi
+
     # 4. Database (Laravel only)
     if [[ "$app_type" == "laravel" ]]; then
         step "Database ($(db_engine_label "$db_engine"))..."
@@ -440,7 +510,8 @@ JSON
     if [[ -n "${GIT_PROVIDER:-}" ]]; then
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
-    log_action "APP CREATED: $app_user domain=$domain php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}"
+    [[ -n "$node_build" ]] && app_set "$app_user" node_build "$node_build"
+    log_action "APP CREATED: $app_user domain=$domain php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
 
     # Email notification
     local _notify_repo _notify_branch
@@ -452,7 +523,7 @@ JSON
     fi
     cipi_notify \
         "Cipi app created: ${app_user} on $(hostname)" \
-        "A new app was created.\n\nServer: $(hostname)\nApp: ${app_user}\nDomain: ${domain}\nPHP: ${php_ver}\nBranch: ${_notify_branch}\nRepository: ${_notify_repo}\nOctane: ${octane_server:-no}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        "A new app was created.\n\nServer: $(hostname)\nApp: ${app_user}\nDomain: ${domain}\nPHP: ${php_ver}\nBranch: ${_notify_branch}\nRepository: ${_notify_repo}\nRepository access: ${GIT_REPO_ACCESS:-not checked}\nOctane: ${octane_server:-no}\nBuild: ${node_build:-none}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         app_create
 
     # 8. Nginx vhost
@@ -523,7 +594,9 @@ CRON
     else
         _create_deployer_config_from_template "$app_type" "$app_user" "$repository" "$branch" "$php_ver"
     fi
-    success "Deployer"
+    # The recipe runs .deployer/node-build.sh when it exists (Laravel templates).
+    [[ -n "$node_build" ]] && _sync_node_build_script "$app_user"
+    success "Deployer${node_build:+ + asset build}"
 
     # 12. Sudoers (worker restart only)
     step "Permissions..."
@@ -564,6 +637,7 @@ SUDO
     else
         echo -e "  Runtime:    ${CYAN}PHP-FPM${NC}"
     fi
+    [[ -n "$node_build" ]] && echo -e "  Build:      ${CYAN}${node_build}${NC}  ${DIM}(every deploy, before the release goes live)${NC}"
     echo -e "  Home:       ${CYAN}${home}${NC}"
     [[ "$app_type" == "custom" ]] && echo -e "  Docroot:    ${CYAN}/${docroot:-}${NC}"
     echo ""
@@ -585,9 +659,10 @@ SUDO
             else
                 echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
                 echo -e "  ${CYAN}${deploy_key}${NC}"
-                echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
+                echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
                 [[ -z "${GIT_PROVIDER:-}" ]] && echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
             fi
+            _app_summary_repo_access "$app_user" "$branch"
             echo ""
             echo -e "  ${BOLD}Next:${NC} cipi deploy ${app_user}"
             echo -e "        cipi ssl install ${app_user}"
@@ -605,11 +680,12 @@ SUDO
         else
             echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
             echo -e "  ${CYAN}${deploy_key}${NC}"
-            echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
+            echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
             echo ""
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}  ${DIM}(push events)${NC}"
             echo -e "  ${BOLD}Secret${NC}      ${CYAN}${webhook_token}${NC}"
         fi
+        _app_summary_repo_access "$app_user" "$branch"
         echo ""
         echo -e "  ${BOLD}Next:${NC} cipi app env ${app_user}      ${DIM}(build and runtime variables)${NC}"
         echo -e "        cipi deploy ${app_user}"
@@ -622,7 +698,7 @@ SUDO
         else
             echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
             echo -e "  ${CYAN}${deploy_key}${NC}"
-            echo -e "  ${DIM}GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys (read access is enough)${NC}"
+            echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
             echo ""
             echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
             echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
@@ -631,6 +707,7 @@ SUDO
                 echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
             fi
         fi
+        _app_summary_repo_access "$app_user" "$branch"
         echo ""
         if [[ -n "$octane_server" ]]; then
             echo -e "  ${BOLD}Next:${NC} composer require laravel/octane cipi/agent  (in your Laravel project)"
@@ -653,6 +730,29 @@ SUDO
     echo ""
     echo -e "  ${YELLOW}${BOLD}⚠ SAVE THESE CREDENTIALS — shown only once${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# Where the deploy key goes on the forge of this repository (summary hint).
+_app_deploy_key_hint() {
+    case "$(_git_detect_provider "${1:-}")" in
+        github)     echo "GitHub: Settings → Deploy keys (read access is enough)" ;;
+        gitlab)     echo "GitLab: Settings → Repository → Deploy keys (read access is enough)" ;;
+        bitbucket)  echo "Bitbucket: Repository settings → Access keys" ;;
+        azure)      echo "Azure DevOps: User settings → SSH public keys" ;;
+        origin)     echo "Origin: origin ssh-key add ~/.ssh/id_ed25519.pub (account SSH key)" ;;
+        codecommit) echo "CodeCommit: IAM → user → Security credentials → Upload SSH public key" ;;
+        *)          echo "GitHub: Settings → Deploy keys · GitLab: Settings → Repository → Deploy keys · Gitea/Forgejo: Settings → Deploy keys" ;;
+    esac
+}
+
+# One summary line: can the deploy key read the repository? (git_verify_repo_access)
+_app_summary_repo_access() {
+    local app="$1" branch="${2:-main}"
+    case "${GIT_REPO_ACCESS:-}" in
+        ok)       echo -e "  ${BOLD}Repository${NC}  ${GREEN}reachable ✓${NC} ${DIM}(branch ${branch})${NC}" ;;
+        nobranch) echo -e "  ${BOLD}Repository${NC}  ${YELLOW}reachable, but it has no branch '${branch}'${NC} ${DIM}— cipi app edit ${app} --branch=<name>${NC}" ;;
+        denied)   echo -e "  ${BOLD}Repository${NC}  ${RED}not readable with the deploy key${NC} ${DIM}— the first deploy fails until it is; check with: cipi git check ${app}${NC}" ;;
+    esac
 }
 
 # ── LIST ──────────────────────────────────────────────────────
@@ -910,7 +1010,7 @@ app_edit() {
     [[ -z "$app" ]] && { error "Usage: cipi app edit <app> [--domain=D] [--php=X.Y] [--branch=B] [--repository=URL] [--node-build=CMD|--no-node-build] [--predeploy-snapshot|--no-predeploy-snapshot]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
-    local changed=false cur_php domain_change_from=""
+    local changed=false cur_php domain_change_from="" repo_changed=false
     cur_php=$(app_get "$app" php)
 
     if [[ -n "${ARG_domain:-}" ]]; then
@@ -976,7 +1076,7 @@ app_edit() {
                 source "${CIPI_LIB}/node.sh"
                 _node_webhook_config "$app"
             fi
-            success "Branch → ${ARG_branch}"; changed=true
+            success "Branch → ${ARG_branch}"; changed=true; repo_changed=true
         fi
     fi
     if [[ -n "${ARG_repository:-}" ]]; then
@@ -1004,7 +1104,23 @@ app_edit() {
                 fi
             fi
 
-            success "Repository updated"; changed=true
+            success "Repository updated"; changed=true; repo_changed=true
+        fi
+    fi
+    # A new repository or branch: can the deploy key read it? On a terminal a
+    # refused read on a known forge offers to save or replace the token and
+    # registers the key (git.sh).
+    if [[ "$repo_changed" == true ]]; then
+        local cur_repo cur_branch
+        cur_repo=$(app_get "$app" repository); cur_branch=$(app_get "$app" branch)
+        if [[ -n "$cur_repo" ]]; then
+            declare -f git_verify_repo_access >/dev/null 2>&1 || source "${CIPI_LIB}/git.sh"
+            local pk="" skip=""
+            [[ -f "/home/${app}/.ssh/id_ed25519.pub" ]] && pk=$(cat "/home/${app}/.ssh/id_ed25519.pub")
+            [[ "$(app_get "$app" custom)" == "true" && "$(app_get "$app" runtime)" != "node" ]] && skip="skip_webhook"
+            git_verify_repo_access "$app" "$cur_repo" "${cur_branch:-main}" "$(app_get "$app" domain)" \
+                "$(app_get "$app" webhook_token)" "$pk" "$skip" || true
+            [[ -n "${GIT_PROVIDER:-}" ]] && git_save_app_data "$app" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
         fi
     fi
     if [[ -n "${ARG_node_build+x}" || "${ARG_no_node_build:-}" == "true" ]]; then

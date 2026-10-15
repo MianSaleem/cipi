@@ -50,10 +50,12 @@ with that key and then running `su root`.
 
 ```bash
 cipi app create
-# username, domain, git repo, branch, PHP version
-# → Laravel: user, DB, Nginx, workers, cron, webhook
-# → Laravel Octane: cipi app create --octane
+# a menu: Laravel (default) · custom · Node spa / static / ssr
+# → Laravel: PHP-FPM or Octane, MariaDB or PostgreSQL, then username, domain,
+#   git repo, branch, PHP version, optional asset build (npm ci && npm run build)
 # → Custom: user, Nginx, PHP-FPM; Git optional (empty = SFTP-only to ~/htdocs)
+# The deploy key is tested against the repository before you leave the wizard;
+# if it cannot read it, Cipi offers to save the forge token and adds the key.
 ```
 
 **3. Deploy and go live:**
@@ -169,6 +171,16 @@ cipi backup profile add hourly-db --scope=db \
 
 cipi backup profile add nightly --scope=all \
     --cron='0 2 * * *' --keep-days=14 --dest=s3 --encrypt
+```
+
+`cipi backup configure` sets the default bucket (`s3` in a profile) and any
+number of further buckets are **named destinations** with their own keys —
+another provider, another region, a customer's own account:
+
+```bash
+cipi backup destination add offsite --bucket=acme-backups \
+    --key=... --secret=... --endpoint=https://eu-central-1.your-objectstorage.com
+cipi backup profile edit nightly --dest=local,s3,offsite
 ```
 
 Databases are discovered from the engine, so tenant databases an app creates at
@@ -347,7 +359,7 @@ Already in the base stack, so not in the list: the **Imagick PHP extension**, **
 
 ### 🔗 Webhook Auto-Deploy
 
-Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https://azure.microsoft.com/products/devops), [Cursor Origin](https://cursor.com/origin), and [AWS CodeCommit](https://aws.amazon.com/codecommit/) integration — deploy keys (and webhooks where the forge has them) configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material).
+Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https://azure.microsoft.com/products/devops), [Cursor Origin](https://cursor.com/origin), and [AWS CodeCommit](https://aws.amazon.com/codecommit/) integration — deploy keys (and webhooks where the forge has them) configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material). `cipi app create` and `cipi app edit --repository` / `--branch` test the deploy key against the repository on the spot: when it cannot read it, Cipi says why and — on a terminal — offers to save or replace the forge token, registers the key and checks again. `cipi git check [app]` repeats the test at any time.
 
 ### 📦 App Types
 

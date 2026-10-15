@@ -33,6 +33,7 @@ backup_command() {
         configure) _bk_configure ;;
         status)    _bk_status "$@" ;;
         profile|profiles) _bk_profile_command "$@" ;;
+        destination|destinations|dest) _bk_destination_command "$@" ;;
         run)       _bk_run "$@" ;;
         list)      _bk_list "$@" ;;
         prune)     _bk_prune "$@" ;;
@@ -40,7 +41,7 @@ backup_command() {
         check)     _bk_check_stale "$@" ;;
         fetch)     _bk_fetch "$@" ;;
         key)       _bk_key_command "$@" ;;
-        *) error "Use: configure status profile run list prune verify fetch key"; exit 1 ;;
+        *) error "Use: configure status destination profile run list prune verify fetch key"; exit 1 ;;
     esac
 }
 
@@ -60,7 +61,7 @@ _bk_init_local() {
     mkdir -p "$cl" || return 1
     chmod 700 "$cl" 2>/dev/null || true
     jq -n --arg l "$cl" \
-        '{aws_key:"",aws_secret:"",bucket:"",region:"eu-central-1",endpoint_url:"",tmpdir:"/var/tmp",local_dir:$l,profiles:{}}' \
+        '{aws_key:"",aws_secret:"",bucket:"",region:"eu-central-1",endpoint_url:"",tmpdir:"/var/tmp",local_dir:$l,s3_destinations:{},profiles:{}}' \
         | _bk_cfg_write
 }
 
@@ -73,8 +74,78 @@ _bk_local_root() {
     echo "${d:-$BACKUP_DEFAULT_LOCAL}"
 }
 
-_bk_s3_bucket() { _bk_cfg | jq -r '.bucket // ""'; }
-_bk_has_s3()    { [[ -n "$(_bk_s3_bucket)" ]]; }
+# ── S3 destinations ──────────────────────────────────────────
+#
+# The bucket of `cipi backup configure` is the default S3 destination: every
+# profile knows it as "s3", and it still lives in the top-level keys of
+# backup.json (bucket, region, endpoint_url, aws_key, aws_secret), so a server
+# configured before 5.6 carries on unchanged. Further buckets — another
+# provider, another region, a customer's own account — are *named* destinations
+# under `s3_destinations` (cipi backup destination add <name>), each with its
+# own credentials; a profile lists any of them next to local and s3.
+
+_bk_s3_bucket() { _bk_s3_json "${1:-s3}" | jq -r '.bucket // ""'; }
+_bk_has_s3()    { [[ -n "$(_bk_s3_bucket "${1:-s3}")" ]]; }
+
+# Every S3 destination a copy can land on: "s3" first when the default bucket
+# is set, then the named ones.
+_bk_s3_names() {
+    local cfg; cfg=$(_bk_cfg)
+    [[ -n "$(echo "$cfg" | jq -r '.bucket // ""')" ]] && echo s3
+    echo "$cfg" | jq -r '(.s3_destinations // {}) | keys[]' 2>/dev/null || true
+}
+
+# {bucket, region, endpoint_url, aws_key, aws_secret} of one destination;
+# nothing when it does not exist.
+_bk_s3_json() {
+    local name="${1:-s3}"
+    if [[ "$name" == "s3" ]]; then
+        _bk_cfg | jq '{bucket: (.bucket // ""), region: (.region // "eu-central-1"), endpoint_url: (.endpoint_url // ""), aws_key: (.aws_key // ""), aws_secret: (.aws_secret // "")}'
+    else
+        _bk_cfg | jq --arg n "$name" '(.s3_destinations // {})[$n] // empty'
+    fi
+}
+
+_bk_s3_exists() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && return 1
+    [[ "$name" == "s3" ]] && { _bk_has_s3; return; }
+    [[ -n "$(_bk_s3_json "$name")" ]]
+}
+
+# Same charset as profile names; local and s3 are taken.
+_bk_valid_dest_name() {
+    [[ "$1" =~ ^[a-z][a-z0-9-]{1,31}$ && "$1" != "local" && "$1" != "s3" ]]
+}
+
+# Profiles that write to a destination, one per line.
+_bk_dest_profiles() {
+    _bk_profiles_json | jq -r --arg d "$1" 'to_entries[] | select((.value.destinations // []) | index($d) != null) | .key' 2>/dev/null || true
+}
+
+# s3://<bucket>/cipi/[<profile>/[<timestamp>/]] on one destination; status 1
+# when the destination has no bucket.
+_bk_s3_uri() {
+    local name="$1" p="${2:-}" ts="${3:-}"
+    local b; b=$(_bk_s3_bucket "$name")
+    [[ -n "$b" ]] || return 1
+    local uri="s3://${b}/cipi/"
+    [[ -n "$p" ]]  && uri="${uri}${p}/"
+    [[ -n "$ts" ]] && uri="${uri}${ts}/"
+    printf '%s' "$uri"
+}
+
+# The first S3 destination that holds a run (a non-empty listing): fetch and
+# verify use it when there is no local copy.
+_bk_s3_find_run() {
+    local p="$1" ts="$2" dn
+    command -v aws &>/dev/null || return 1
+    while IFS= read -r dn; do
+        [[ -n "$dn" ]] || continue
+        [[ -n "$(_bk_aws "$dn" ls "$(_bk_s3_uri "$dn" "$p" "$ts")" 2>/dev/null)" ]] && { echo "$dn"; return 0; }
+    done < <(_bk_s3_names)
+    return 1
+}
 
 _ensure_awscli() {
     if ! command -v aws &>/dev/null; then
@@ -120,6 +191,33 @@ _aws_s3() {
     else
         aws s3 "$@"
     fi
+}
+
+# aws s3 <args> with the credentials of one destination JSON (see _bk_s3_json):
+# keys in the environment of this one call, region and endpoint always given.
+# Without keys the default credential chain applies (instance role).
+_bk_aws_json() {
+    local d="$1"; shift
+    local k s ep region
+    k=$(echo "$d" | jq -r '.aws_key // ""'); s=$(echo "$d" | jq -r '.aws_secret // ""')
+    ep=$(echo "$d" | jq -r '.endpoint_url // ""'); region=$(echo "$d" | jq -r '.region // ""')
+    local -a opts=(--region "${region:-eu-central-1}")
+    [[ -n "$ep" ]] && opts+=(--endpoint-url "$ep")
+    if [[ -n "$k" ]]; then
+        env -u AWS_PROFILE -u AWS_SESSION_TOKEN AWS_ACCESS_KEY_ID="$k" AWS_SECRET_ACCESS_KEY="$s" aws s3 "${opts[@]}" "$@"
+    else
+        aws s3 "${opts[@]}" "$@"
+    fi
+}
+
+# aws s3 <args> against a destination by name. "s3" is the default bucket, with
+# the profile `cipi backup configure` wrote to /root/.aws, as before.
+_bk_aws() {
+    local name="$1"; shift
+    [[ "$name" == "s3" ]] && { _aws_s3 "$@"; return; }
+    local d; d=$(_bk_s3_json "$name")
+    [[ -n "$d" ]] || { echo "unknown backup destination: ${name}" >&2; return 1; }
+    _bk_aws_json "$d" "$@"
 }
 
 # ── Encryption ───────────────────────────────────────────────
@@ -522,7 +620,11 @@ _bk_profile_add() {
             case "$d" in
                 local) ;;
                 s3) _bk_has_s3 || { error "--dest=s3 but no bucket configured. Run: cipi backup configure"; exit 1; } ;;
-                *) error "--dest must be 'local', 's3' or 'local,s3'"; exit 1 ;;
+                *) _bk_s3_exists "$d" || {
+                       error "Unknown destination '${d}' — use local, s3 (the default bucket) or a named S3 destination"
+                       info "Configured destinations: cipi backup destination list"
+                       exit 1
+                   } ;;
             esac
         done < <(echo "$dests" | jq -r '.[]')
         [[ "$(echo "$dests" | jq 'length')" -eq 0 ]] && { error "--dest cannot be empty"; exit 1; }
@@ -567,7 +669,7 @@ _bk_profile_add() {
         error "--scope=db with an empty --databases list would back up nothing"; exit 1
     fi
     if [[ "$(echo "$json" | jq '.destinations | length')" -eq 0 ]]; then
-        error "Profile has no destination — set --dest=local and/or --dest=s3"; exit 1
+        error "Profile has no destination — set --dest=local, --dest=s3 or a named destination (cipi backup destination list)"; exit 1
     fi
 
     _bk_profile_save "$name" "$json"
@@ -921,21 +1023,26 @@ _bk_run_profile() {
                     errors="${errors}${errors:+, }dest:local"
                 fi
                 ;;
-            s3)
-                _ensure_awscli
-                local bucket; bucket=$(_bk_s3_bucket)
-                if [[ -z "$bucket" ]]; then
-                    error "  no S3 bucket configured"
-                    errors="${errors}${errors:+, }dest:s3"
+            *)
+                # "s3" is the default bucket, anything else a named destination.
+                local uri
+                if ! uri=$(_bk_s3_uri "$dest" "$p" "$ts"); then
+                    if [[ "$dest" == "s3" ]]; then
+                        error "  no S3 bucket configured"
+                    else
+                        error "  unknown destination '${dest}' — cipi backup destination list"
+                    fi
+                    errors="${errors}${errors:+, }dest:${dest}"
                     continue
                 fi
+                _ensure_awscli
                 local s3_err
-                if ! s3_err=$(_aws_s3 cp "${tmp}/" "s3://${bucket}/cipi/${p}/${ts}/" --recursive 2>&1); then
-                    error "  S3 upload failed:"
+                if ! s3_err=$(_bk_aws "$dest" cp "${tmp}/" "$uri" --recursive 2>&1); then
+                    error "  upload to ${dest} failed:"
                     echo "$s3_err" | sed 's/^/    /'
-                    errors="${errors}${errors:+, }dest:s3"
+                    errors="${errors}${errors:+, }dest:${dest}"
                 else
-                    success "  → s3://${bucket}/cipi/${p}/${ts}/"
+                    success "  → ${uri}$([[ "$dest" != "s3" ]] && echo " (${dest})")"
                 fi
                 ;;
         esac
@@ -1066,25 +1173,28 @@ _bk_list_runs() {
     local p="$1"
     local ldir; ldir="$(_bk_local_root)/${p}"
     [[ -d "$ldir" ]] && ls -1 "$ldir" 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$' || true
-    if _bk_has_s3; then
-        _bk_s3_ls_dirs "s3://$(_bk_s3_bucket)/cipi/${p}/" \
+    local name
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        _bk_s3_ls_dirs "$name" "$(_bk_s3_uri "$name" "$p")" \
             | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}$' || true
-    fi
+    done < <(_bk_s3_names)
 }
 
 # Sub-"directories" of an S3 prefix, one per line. An empty or missing prefix
 # is not an error (aws exits 1 with nothing on stderr); anything else — no CLI,
 # denied ListBucket, a wrong endpoint — is reported on stderr.
+# Usage: _bk_s3_ls_dirs <destination> <uri>
 _bk_s3_ls_dirs() {
-    local uri="$1" out errf rc=0
+    local name="$1" uri="$2" out errf rc=0
     if ! command -v aws &>/dev/null; then
         echo "AWS CLI not found — S3 archives cannot be listed" >&2
         return 1
     fi
     errf=$(mktemp)
-    out=$(_aws_s3 ls "$uri" 2>"$errf") || rc=$?
+    out=$(_bk_aws "$name" ls "$uri" 2>"$errf") || rc=$?
     if [[ $rc -ne 0 && -s "$errf" ]]; then
-        echo "cannot list ${uri}: $(grep -v '^[[:space:]]*$' "$errf" | tail -1)" >&2
+        echo "cannot list ${uri} (${name}): $(grep -v '^[[:space:]]*$' "$errf" | tail -1)" >&2
         rm -f "$errf"
         return 1
     fi
@@ -1099,18 +1209,21 @@ _bk_delete_run() {
         rm -rf "$ldir"
         step "  Deleted local: ${p}/${ts}"
     fi
-    if _bk_has_s3 && command -v aws &>/dev/null; then
-        local bucket; bucket=$(_bk_s3_bucket)
-        if _aws_s3 ls "s3://${bucket}/cipi/${p}/${ts}/" &>/dev/null; then
+    command -v aws &>/dev/null || return 0
+    local name uri
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        uri=$(_bk_s3_uri "$name" "$p" "$ts") || continue
+        if _bk_aws "$name" ls "$uri" &>/dev/null; then
             local rm_err
-            if rm_err=$(_aws_s3 rm "s3://${bucket}/cipi/${p}/${ts}/" --recursive 2>&1 >/dev/null); then
-                step "  Deleted S3:    ${p}/${ts}"
+            if rm_err=$(_bk_aws "$name" rm "$uri" --recursive 2>&1 >/dev/null); then
+                step "  Deleted S3:    ${p}/${ts}$([[ "$name" != "s3" ]] && echo " (${name})")"
             else
-                error "  S3 delete failed: ${p}/${ts} — $(tail -1 <<< "$rm_err")"
-                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }${p}/${ts}: delete failed"
+                error "  S3 delete failed (${name}): ${p}/${ts} — $(tail -1 <<< "$rm_err")"
+                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }${p}/${ts} (${name}): delete failed"
             fi
         fi
-    fi
+    done < <(_bk_s3_names)
 }
 
 # ── Orphaned archives ────────────────────────────────────────
@@ -1196,38 +1309,40 @@ _bk_prune_orphans() {
         rm -f "$f" && step "  Deleted local: $(basename "$f")"
     done
 
-    # S3: prefixes under cipi/ that are not a profile
-    _bk_has_s3 || return 0
-    local bucket errf names runs
-    bucket=$(_bk_s3_bucket)
+    # S3: prefixes under cipi/ that are not a profile, on every destination
+    local dn errf names runs
     errf=$(mktemp)
-    names=$(_bk_s3_ls_dirs "s3://${bucket}/cipi/" 2>"$errf") || true
-    if [[ -s "$errf" ]]; then
-        _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }orphans: $(paste -sd' ' "$errf")"
-        warn "  Old archives could not be checked — $(paste -sd' ' "$errf")"
-        rm -f "$errf"; return 0
-    fi
-    while IFS= read -r name; do
-        [[ -n "$name" ]] || continue
-        grep -Fxq "$name" <<< "$profiles" && continue
-        runs=$(_bk_s3_ls_dirs "s3://${bucket}/cipi/${name}/" 2>"$errf") || true
+    while IFS= read -r dn; do
+        [[ -n "$dn" ]] || continue
+        : > "$errf"
+        names=$(_bk_s3_ls_dirs "$dn" "$(_bk_s3_uri "$dn")" 2>"$errf") || true
         if [[ -s "$errf" ]]; then
-            _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name}: $(paste -sd' ' "$errf")"
-            : > "$errf"; continue
+            _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }orphans (${dn}): $(paste -sd' ' "$errf")"
+            warn "  Old archives on ${dn} could not be checked — $(paste -sd' ' "$errf")"
+            continue
         fi
-        while IFS= read -r ts; do
-            [[ -n "$ts" ]] || continue
-            _orphan_old "$ts" || continue
-            if [[ "$dry" == true ]]; then echo -e "  ${DIM}would delete${NC} s3 cipi/${name}/${ts} (orphaned)"; continue; fi
-            local rm_err
-            if rm_err=$(_aws_s3 rm "s3://${bucket}/cipi/${name}/${ts}/" --recursive 2>&1 >/dev/null); then
-                step "  Deleted S3:    cipi/${name}/${ts} (orphaned)"
-            else
-                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name}/${ts}: delete failed"
-                error "  S3 delete failed: cipi/${name}/${ts} — $(tail -1 <<< "$rm_err")"
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            grep -Fxq "$name" <<< "$profiles" && continue
+            runs=$(_bk_s3_ls_dirs "$dn" "$(_bk_s3_uri "$dn" "$name")" 2>"$errf") || true
+            if [[ -s "$errf" ]]; then
+                _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name} (${dn}): $(paste -sd' ' "$errf")"
+                : > "$errf"; continue
             fi
-        done <<< "$runs"
-    done <<< "$names"
+            while IFS= read -r ts; do
+                [[ -n "$ts" ]] || continue
+                _orphan_old "$ts" || continue
+                if [[ "$dry" == true ]]; then echo -e "  ${DIM}would delete${NC} ${dn} cipi/${name}/${ts} (orphaned)"; continue; fi
+                local rm_err
+                if rm_err=$(_bk_aws "$dn" rm "$(_bk_s3_uri "$dn" "$name" "$ts")" --recursive 2>&1 >/dev/null); then
+                    step "  Deleted S3:    cipi/${name}/${ts} (orphaned, ${dn})"
+                else
+                    _BK_PRUNE_ERRORS="${_BK_PRUNE_ERRORS:-}${_BK_PRUNE_ERRORS:+; }cipi/${name}/${ts} (${dn}): delete failed"
+                    error "  S3 delete failed (${dn}): cipi/${name}/${ts} — $(tail -1 <<< "$rm_err")"
+                fi
+            done <<< "$runs"
+        done <<< "$names"
+    done < <(_bk_s3_names)
     rm -f "$errf"
     unset -f _orphan_old
     return 0
@@ -1348,9 +1463,12 @@ _bk_list() {
             ((n++)) || true
             local where=""
             [[ -d "$(_bk_local_root)/${p}/${ts}" ]] && where="local"
-            if _bk_has_s3 && command -v aws &>/dev/null \
-               && _aws_s3 ls "s3://$(_bk_s3_bucket)/cipi/${p}/${ts}/" &>/dev/null; then
-                where="${where}${where:+,}s3"
+            if command -v aws &>/dev/null; then
+                local dn
+                while IFS= read -r dn; do
+                    [[ -n "$dn" ]] || continue
+                    _bk_aws "$dn" ls "$(_bk_s3_uri "$dn" "$p" "$ts")" &>/dev/null && where="${where}${where:+,}${dn}"
+                done < <(_bk_s3_names)
             fi
             printf "  ${CYAN}%-22s${NC} %s\n" "$ts" "${where:-—}"
         done < <(_bk_list_runs "$p" | sort -r | awk '!seen[$0]++')
@@ -1375,10 +1493,18 @@ _bk_status() {
     bucket=$(echo "$cfg" | jq -r '.bucket // ""')
     ep=$(echo "$cfg" | jq -r '.endpoint_url // ""')
     if [[ -n "$bucket" ]]; then
-        printf "  %-14s ${GREEN}configured${NC}  s3://%s%s\n" "S3" "$bucket" "${ep:+  (${ep})}"
+        printf "  %-14s ${GREEN}configured${NC}  s3://%s%s\n" "S3 (s3)" "$bucket" "${ep:+  (${ep})}"
     else
-        printf "  %-14s ${DIM}not configured${NC}\n" "S3"
+        printf "  %-14s ${DIM}not configured${NC}\n" "S3 (s3)"
     fi
+    # Named destinations (cipi backup destination add)
+    local dn dj
+    while IFS= read -r dn; do
+        [[ -n "$dn" && "$dn" != "s3" ]] || continue
+        dj=$(_bk_s3_json "$dn")
+        ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
+        printf "  %-14s ${GREEN}configured${NC}  s3://%s%s\n" "$dn" "$(echo "$dj" | jq -r '.bucket // ""')" "${ep:+  (${ep})}"
+    done < <(_bk_s3_names)
     printf "  %-14s %s\n" "Local" "$(_bk_local_root)"
     if [[ -f "$BACKUP_KEY_FILE" ]]; then
         printf "  %-14s ${GREEN}present${NC}      %s\n" "Encryption key" "$BACKUP_KEY_FILE"
@@ -1504,29 +1630,31 @@ _bk_verify_run() {
     local dir="$(_bk_local_root)/${p}/${ts}" cleanup=""
 
     if [[ ! -d "$dir" ]]; then
+        [[ -n "$(_bk_s3_names)" ]] || { error "  no local copy and no S3 destination configured"; return 1; }
+        _ensure_awscli
+        local dn uri
+        dn=$(_bk_s3_find_run "$p" "$ts") || { error "  run not found on any S3 destination"; return 1; }
+        uri=$(_bk_s3_uri "$dn" "$p" "$ts")
         if [[ "$deep" != true ]]; then
             # No local copy: check the remote objects exist and are non-empty
             # without paying to download them.
-            _bk_has_s3 || { error "  no local copy and no S3 configured"; return 1; }
-            _ensure_awscli
             local listing
-            listing=$(_aws_s3 ls "s3://$(_bk_s3_bucket)/cipi/${p}/${ts}/" --recursive 2>/dev/null || true)
-            [[ -z "$listing" ]] && { error "  run not found on S3"; return 1; }
+            listing=$(_bk_aws "$dn" ls "$uri" --recursive 2>/dev/null || true)
+            [[ -z "$listing" ]] && { error "  run not found on ${dn}"; return 1; }
             local empty
             empty=$(echo "$listing" | awk '$3 == 0 {print $4}')
             if [[ -n "$empty" ]]; then
                 error "  zero-byte objects:"; echo "$empty" | sed 's/^/    /'; return 1
             fi
-            success "  $(echo "$listing" | wc -l) object(s) present on S3, none empty"
+            success "  $(echo "$listing" | wc -l) object(s) present on ${dn}, none empty"
             info  "  Use --deep to download and decompress them"
             return 0
         fi
-        _ensure_awscli
         dir="$(_bk_tmp_base)/cipi-verify-${p}-${ts}"
         cleanup="$dir"
         mkdir -p "$dir"
-        step "  Downloading from S3..."
-        _aws_s3 cp "s3://$(_bk_s3_bucket)/cipi/${p}/${ts}/" "$dir/" --recursive &>/dev/null \
+        step "  Downloading from ${dn}..."
+        _bk_aws "$dn" cp "$uri" "$dir/" --recursive &>/dev/null \
             || { error "  download failed"; rm -rf "$cleanup"; return 1; }
     fi
 
@@ -1574,10 +1702,18 @@ _bk_fetch() {
         step "Copying local run ${p}/${ts}..."
         cp -a "${src}/." "${dest}/" || { error "Copy failed"; exit 1; }
     else
-        _bk_has_s3 || { error "Run not found locally and no S3 configured"; exit 1; }
+        [[ -n "$(_bk_s3_names)" ]] || { error "Run not found locally and no S3 destination configured"; exit 1; }
         _ensure_awscli
-        step "Downloading s3://$(_bk_s3_bucket)/cipi/${p}/${ts}/ ..."
-        _aws_s3 cp "s3://$(_bk_s3_bucket)/cipi/${p}/${ts}/" "${dest}/" --recursive &>/dev/null \
+        local dn uri
+        dn=$(_bk_s3_find_run "$p" "$ts") || {
+            rmdir "$dest" 2>/dev/null || true
+            error "No backup found at ${p}/${ts} on any destination — nothing was downloaded."
+            info "List what exists:  cipi backup list ${p}"
+            exit 1
+        }
+        uri=$(_bk_s3_uri "$dn" "$p" "$ts")
+        step "Downloading ${uri} (${dn})..."
+        _bk_aws "$dn" cp "$uri" "${dest}/" --recursive &>/dev/null \
             || { error "Download failed — check the profile and timestamp (cipi backup list ${p})"; exit 1; }
     fi
 
@@ -1634,8 +1770,9 @@ _bk_configure() {
         cl=$(echo "$_bkj" | jq -r '.local_dir // ""')
     fi
 
-    echo -e "\n${BOLD}Backup destination${NC}"
-    echo -e "  ${DIM}Leave the bucket empty to keep backups on this server only.${NC}\n"
+    echo -e "\n${BOLD}Backup destination${NC} ${DIM}— the default bucket, 's3' in profiles${NC}"
+    echo -e "  ${DIM}Leave the bucket empty to keep backups on this server only.${NC}"
+    echo -e "  ${DIM}Further buckets are named destinations: cipi backup destination add <name>${NC}\n"
 
     read_input "Access Key ID" "$ck" ck
     read_input "Secret Access Key" "$cs" cs
@@ -1662,12 +1799,14 @@ _bk_configure() {
     ct="${ct:-/var/tmp}"
     cl="${cl:-$BACKUP_DEFAULT_LOCAL}"
 
-    local existing_profiles; existing_profiles=$(_bk_profiles_json)
+    local existing_profiles existing_dests
+    existing_profiles=$(_bk_profiles_json)
+    existing_dests=$(_bk_cfg | jq '.s3_destinations // {}')
     jq -n \
         --arg k "$ck" --arg s "$cs" --arg b "$cb" \
         --arg r "$cr" --arg e "$ce" --arg t "$ct" --arg l "$cl" \
-        --argjson p "$existing_profiles" \
-        '{"aws_key":$k,"aws_secret":$s,"bucket":$b,"region":$r,"endpoint_url":$e,"tmpdir":$t,"local_dir":$l,"profiles":$p}' \
+        --argjson p "$existing_profiles" --argjson d "$existing_dests" \
+        '{"aws_key":$k,"aws_secret":$s,"bucket":$b,"region":$r,"endpoint_url":$e,"tmpdir":$t,"local_dir":$l,"s3_destinations":$d,"profiles":$p}' \
         | _bk_cfg_write
 
     mkdir -p "$cl" && chmod 700 "$cl" 2>/dev/null || true
@@ -1707,5 +1846,187 @@ AWSCFG
     echo -e "  ${DIM}The schedule is managed for you — no crontab editing needed.${NC}"
     echo -e "  ${DIM}Review it:            ${CYAN}cipi backup status${NC}"
     echo -e "  ${DIM}Add another strategy: ${CYAN}cipi backup profile add hourly-db --scope=db --every=30m --keep=48 --dest=local${NC}"
+    echo -e "  ${DIM}Add another bucket:   ${CYAN}cipi backup destination add offsite --bucket=<name> --key=<id> --secret=<key> [--endpoint=<url>]${NC}"
     echo ""
+}
+
+# ── Named S3 destinations CLI ────────────────────────────────
+
+_bk_destination_command() {
+    local sub="${1:-list}"; shift||true
+    case "$sub" in
+        list|ls)   _bk_destination_list ;;
+        show)      _bk_destination_show "$@" ;;
+        add|edit)  _bk_destination_add "$sub" "$@" ;;
+        remove|rm|delete) _bk_destination_remove "$@" ;;
+        test)      _bk_destination_test "$@" ;;
+        *) error "Use: cipi backup destination list|show|add|edit|remove|test"; exit 1 ;;
+    esac
+}
+
+_bk_destination_list() {
+    _bk_require_config
+    local names; names=$(_bk_s3_names)
+    echo -e "\n${BOLD}Backup destinations${NC}"
+    printf "  ${CYAN}%-14s${NC} %s\n" "local" "$(_bk_local_root)"
+    local dn dj b ep used
+    while IFS= read -r dn; do
+        [[ -n "$dn" ]] || continue
+        dj=$(_bk_s3_json "$dn")
+        b=$(echo "$dj" | jq -r '.bucket // ""'); ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
+        used=$(_bk_dest_profiles "$dn" | paste -sd, -)
+        printf "  ${CYAN}%-14s${NC} s3://%s%s%s%b\n" "$dn" "$b" "${ep:+  (${ep})}" "$([[ "$dn" == "s3" ]] && echo "  [default]")" "${used:+  ${DIM}← ${used}${NC}}"
+    done <<< "$names"
+    echo ""
+    if [[ -z "$names" ]]; then
+        echo -e "  ${DIM}No S3 destination yet: cipi backup configure (the default bucket) or cipi backup destination add <name>${NC}"
+    else
+        echo -e "  ${DIM}'s3' is the bucket of cipi backup configure; a profile names any of these: --dest=local,s3,<name>${NC}"
+        echo -e "  ${DIM}Add one: cipi backup destination add <name> --bucket=<b> --key=<id> --secret=<key> [--region=] [--endpoint=]${NC}"
+    fi
+    echo ""
+}
+
+_bk_destination_show() {
+    local n="${1:-}"
+    [[ -z "$n" ]] && { error "Usage: cipi backup destination show <name>"; exit 1; }
+    _bk_require_config
+    _bk_s3_exists "$n" || { error "No such destination: ${n}"; exit 1; }
+    local dj k ep used
+    dj=$(_bk_s3_json "$n")
+    k=$(echo "$dj" | jq -r '.aws_key // ""')
+    ep=$(echo "$dj" | jq -r '.endpoint_url // ""')
+    used=$(_bk_dest_profiles "$n" | paste -sd, -)
+    echo -e "\n${BOLD}Backup destination '${n}'${NC}$([[ "$n" == "s3" ]] && echo -e " ${DIM}(default — cipi backup configure)${NC}")"
+    printf "  %-14s %s\n" "Bucket"     "$(echo "$dj" | jq -r '.bucket // ""')"
+    printf "  %-14s %s\n" "Region"     "$(echo "$dj" | jq -r '.region // "eu-central-1"')"
+    printf "  %-14s %s\n" "Endpoint"   "${ep:-AWS S3}"
+    if [[ -n "$k" ]]; then
+        printf "  %-14s %s\n" "Access key" "${k:0:4}…${k: -4}"
+    else
+        printf "  %-14s %s\n" "Access key" "— (default credential chain)"
+    fi
+    printf "  %-14s %s\n" "Used by"    "${used:-—}"
+    echo ""
+}
+
+# add: every value may come as a flag, the rest is asked on a terminal. The
+# bucket is listed before anything is saved: a destination that cannot be
+# reached would fail every run of every profile that names it.
+_bk_destination_add() {
+    local mode="$1"; shift||true
+    local name="${1:-}"; shift||true
+    [[ -z "$name" ]] && { error "Usage: cipi backup destination ${mode} <name> [--bucket=B] [--key=K] [--secret=S] [--region=R] [--endpoint=URL]"; exit 1; }
+    _bk_require_config
+    [[ "$name" == "s3" ]] && { error "'s3' is the default bucket — change it with: cipi backup configure"; exit 1; }
+    _bk_valid_dest_name "$name" || { error "Invalid destination name '${name}' (lowercase letters, digits and dashes, 2-32 chars; 'local' and 's3' are taken)"; exit 1; }
+    parse_args "$@"
+
+    local cur="{}"
+    if _bk_s3_exists "$name"; then
+        [[ "$mode" == "add" ]] && { error "Destination '${name}' already exists — use: cipi backup destination edit ${name} ..."; exit 1; }
+        cur=$(_bk_s3_json "$name")
+    else
+        [[ "$mode" == "edit" ]] && { error "No such destination: ${name}"; exit 1; }
+    fi
+    local b k s r e
+    b="${ARG_bucket:-$(echo "$cur" | jq -r '.bucket // ""')}"
+    k="${ARG_key:-$(echo "$cur" | jq -r '.aws_key // ""')}"
+    s="${ARG_secret:-$(echo "$cur" | jq -r '.aws_secret // ""')}"
+    r="${ARG_region:-$(echo "$cur" | jq -r '.region // ""')}"
+    e="${ARG_endpoint:-$(echo "$cur" | jq -r '.endpoint_url // ""')}"
+    [[ "${ARG_endpoint:-}" == "none" ]] && e=""
+
+    if [[ -t 0 ]]; then
+        echo -e "\n${BOLD}S3 destination '${name}'${NC}"
+        [[ -z "${ARG_key+x}" ]]    && read_input "Access Key ID" "$k" k
+        [[ -z "${ARG_secret+x}" ]] && read_input "Secret Access Key" "$s" s
+        [[ -z "${ARG_bucket+x}" ]] && read_input "Bucket name" "$b" b
+        [[ -z "${ARG_region+x}" ]] && read_input "Region" "${r:-eu-central-1}" r
+        if [[ -z "${ARG_endpoint+x}" ]]; then
+            echo -e "  ${DIM}Leave empty for AWS S3. Any other S3-compatible provider needs its endpoint URL${NC}"
+            echo -e "  ${DIM}(R2, Hetzner, DO Spaces, Backblaze B2, Scaleway, MinIO — see cipi backup configure).${NC}"
+            read_input "Endpoint URL (optional)" "$e" e
+        fi
+    fi
+    [[ -z "$b" ]] && { error "A bucket is required (--bucket=<name>)"; exit 1; }
+    r="${r:-eu-central-1}"
+    [[ "$b" =~ ^[a-z0-9][a-z0-9._-]{1,62}$ ]] || { error "Invalid bucket name '${b}'"; exit 1; }
+    [[ "$r" =~ ^[A-Za-z0-9-]+$ ]] || { error "Invalid region '${r}'"; exit 1; }
+    [[ -z "$e" || "$e" =~ ^https?://[A-Za-z0-9.:/_-]+$ ]] || { error "Invalid endpoint URL '${e}'"; exit 1; }
+
+    local dj
+    dj=$(jq -n --arg b "$b" --arg k "$k" --arg s "$s" --arg r "$r" --arg e "$e" \
+        --argjson c "$(echo "$cur" | jq '.created_at // (now | floor)')" \
+        '{bucket:$b, aws_key:$k, aws_secret:$s, region:$r, endpoint_url:$e, created_at:$c}')
+
+    _ensure_awscli
+    step "Testing ${name} (s3://${b})..."
+    local test_err
+    if ! test_err=$(_bk_aws_json "$dj" ls "s3://${b}" 2>&1); then
+        error "S3 connection failed — nothing saved:"
+        echo "$test_err" | sed 's/^/  /'
+        exit 1
+    fi
+    success "S3 connection OK"
+
+    _bk_cfg | jq --arg n "$name" --argjson d "$dj" \
+        '.s3_destinations = ((.s3_destinations // {}) | .[$n] = $d)' | _bk_cfg_write
+    if [[ "$mode" == "add" ]]; then
+        success "Backup destination '${name}' added"
+        log_action "BACKUP DESTINATION ADD: ${name} s3://${b}"
+        echo ""
+        echo -e "  ${DIM}Use it in a profile: ${CYAN}cipi backup profile edit <profile> --dest=local,s3,${name}${NC}"
+        echo -e "  ${DIM}or in cipi.yml:      ${CYAN}destinations: [s3, ${name}]${NC}"
+        echo ""
+    else
+        success "Backup destination '${name}' updated"
+        log_action "BACKUP DESTINATION EDIT: ${name} s3://${b}"
+    fi
+}
+
+_bk_destination_remove() {
+    local n="${1:-}"
+    [[ -z "$n" ]] && { error "Usage: cipi backup destination remove <name>"; exit 1; }
+    _bk_require_config
+    [[ "$n" == "s3" ]] && { error "'s3' is the default bucket — empty it with: cipi backup configure"; exit 1; }
+    _bk_s3_exists "$n" || { error "No such destination: ${n}"; exit 1; }
+    local used; used=$(_bk_dest_profiles "$n" | paste -sd, -)
+    if [[ -n "$used" ]]; then
+        error "Destination '${n}' is still used by: ${used}"
+        info "Point them elsewhere first: cipi backup profile edit <profile> --dest=..."
+        exit 1
+    fi
+    if [[ -t 0 ]]; then
+        warn "Removing the destination does not delete the archives in the bucket — and Cipi stops pruning them."
+        confirm "Remove backup destination '${n}'?" || { info "Cancelled"; return 0; }
+    fi
+    _bk_cfg | jq --arg n "$n" 'del(.s3_destinations[$n])' | _bk_cfg_write
+    success "Backup destination '${n}' removed"
+    log_action "BACKUP DESTINATION REMOVE: ${n}"
+}
+
+# List each bucket (or one) with its own credentials.
+_bk_destination_test() {
+    local n="${1:-}" names
+    _bk_require_config
+    if [[ -n "$n" ]]; then
+        _bk_s3_exists "$n" || { error "No such destination: ${n}"; exit 1; }
+        names="$n"
+    else
+        names=$(_bk_s3_names)
+    fi
+    [[ -z "$names" ]] && { warn "No S3 destination configured"; return 0; }
+    _ensure_awscli
+    local dn rc=0 err
+    while IFS= read -r dn; do
+        [[ -n "$dn" ]] || continue
+        step "${dn}: s3://$(_bk_s3_bucket "$dn")"
+        if err=$(_bk_aws "$dn" ls "s3://$(_bk_s3_bucket "$dn")" 2>&1); then
+            success "  reachable"
+        else
+            error "  $(grep -v '^[[:space:]]*$' <<< "$err" | tail -1)"; rc=1
+        fi
+    done <<< "$names"
+    return $rc
 }

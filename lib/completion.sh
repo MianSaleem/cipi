@@ -302,10 +302,11 @@ _cipi_complete() {
 
         backup)
             case $pos in
-                1) sub="configure status profile run list verify prune fetch key" ;;
+                1) sub="configure status profile destination run list verify prune fetch key" ;;
                 2) case "$w1" in
-                       profile) sub="list show add edit remove enable disable" ;;
-                       key)     sub="show rotate" ;;
+                       profile)     sub="list show add edit remove enable disable" ;;
+                       destination) sub="list show add edit remove test" ;;
+                       key)         sub="show rotate" ;;
                    esac ;;
             esac ;;
 
@@ -342,9 +343,10 @@ _cipi_complete() {
         gui|panel) [[ $pos -eq 1 ]] && sub="ssl update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
         git)
             case $pos in
-                1) sub="status github-token gitlab-token gitlab-url origin-token bitbucket-token azure-token codecommit-token remove-github remove-gitlab remove-origin remove-bitbucket remove-azure remove-codecommit refresh" ;;
+                1) sub="status github-token gitlab-token gitlab-url origin-token bitbucket-token azure-token codecommit-token remove-github remove-gitlab remove-origin remove-bitbucket remove-azure remove-codecommit refresh check" ;;
                 2) case "$w1" in
                        refresh) sub="$(_cipi_apps) --rotate-keys --rotate-secret --force" ;;
+                       check)   sub="$(_cipi_apps)" ;;
                    esac ;;
                 3) case "$w1" in
                        refresh) sub="--rotate-keys --rotate-secret --force" ;;

@@ -4,6 +4,70 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.6.0] — 2026-10-15
+
+Four suggestions from users, in one release: a guided `cipi app create`, the asset build asked at creation, the deploy key tested on the spot, and backup profiles that ship to several buckets. Two fixes come with them: a PostgreSQL restore that failed is no longer reported as done, and a `cipi.yml` cron expression with a newline no longer passes validation. Bitbucket Cloud and Azure DevOps, also suggested, have been supported since 5.2.3 (`cipi git bitbucket-token`, `cipi git azure-token`); the app create summary now names them in its deploy-key hints.
+
+### Added — `cipi app create` starts with menus: type, runtime, database engine
+
+The wizard asked for a username before anything else, and the choice that shapes everything — Laravel, custom, Node — existed only as flags (`--custom`, `--node=`, `--octane`). On a terminal, with no type flag, `cipi app create` now opens with numbered menus, the default pre-selected: Enter takes it, a number or the value picks another.
+
+- **App type**: `laravel` (default), `custom`, or a Node app — `spa`, `static`, `ssr`.
+- **Runtime** (Laravel): `fpm` (default) or `octane`, Laravel Octane (FrankenPHP), the same as `--octane`.
+- **Database engine** (Laravel): MariaDB or PostgreSQL, the server default marked, asked right after the runtime and only when both engines are installed.
+- A Node app asks for its framework (`vite` for spa; `next`, `nuxt`, `sveltekit`, `astro`, `remix` for ssr, or none with a start command of your own) or, for a static site, the build command and the output directory.
+
+Then the details as before: username, domain, repository, branch, PHP version. Any type flag skips the menus. Without a terminal (the panel API, a script) every default applies and nothing is printed, so the non-interactive form is unchanged.
+
+### Added — the asset build is asked at creation
+
+The build most Laravel apps need (`npm ci && npm run build`) could only be set afterwards, with `cipi app edit --node-build` or `deploy.node_build` in `cipi.yml`, so the first deploy shipped without compiled assets. The wizard now asks for it after the PHP version — **Build command**, empty for none — and `--node-build=CMD` sets it without a prompt. It is stored as `node_build`, written to `.deployer/node-build.sh`, run by the recipe inside every deploy after `composer install` and before the release goes live, and shown in the summary (`Build:`). The allowlist of the edit command applies: npm, npx, yarn, pnpm, bun or node, no shell syntax. Node apps keep `--build=`; custom apps have no build step. `deploy.post` in `cipi.yml` remains the place for steps that run after the release is live.
+
+### Added — the deploy key is tested against the repository on the spot
+
+`cipi app create` printed the deploy key, and the first deploy failed later with `Could not read from remote repository` when the key had never been added, the forge token had expired, or the branch did not exist. The key is now tested as soon as it is in place — `git ls-remote` as the app user, with the identity Deployer uses, the branch included — and the summary carries the result: `Repository reachable ✓ (branch main)`, `reachable, but it has no branch 'x'`, or `not readable with the deploy key`.
+
+- **On a terminal**, when the repository is on a forge Cipi knows (GitHub, GitLab, Bitbucket Cloud, Azure DevOps, Cursor Origin) and the key cannot read it, Cipi says why and offers to **save the forge token** (none saved yet) or **replace it** (expired, or not covering this repository). With the token it registers the deploy key and the webhook, as `cipi git` does, and checks again. Declining, or a script, gets the exact commands: `cipi git <forge>-token <token> && cipi git refresh <app>`; for an unknown host, where to add the key and `cipi deploy <app> --trust-host=`.
+- **`cipi app edit --repository=` and `--branch=`** run the same check, with the same offer.
+- **`cipi git check [app]`** repeats it at any time: one app (with the token offer), or every app with a repository, exit 1 when one cannot be read. In `cipi help git` and tab-completion.
+- A key the forge has just accepted can take a moment to serve: a refused read is tried once more after three seconds. A read that does not answer within 60 seconds counts as refused. The check never blocks the creation.
+- The deploy-key hint in the summary names the place for the forge of the repository — GitHub, GitLab, Bitbucket, Azure DevOps, Origin, CodeCommit — instead of GitHub and GitLab only.
+
+The app-created mail reports `Repository access` and `Build`.
+
+### Added — backup profiles ship to several S3 buckets
+
+`cipi backup configure` held one bucket, shared by every profile, so a copy on another provider, in another region or in a customer's own account was not possible. A server now has **named destinations** next to the default bucket.
+
+- **`cipi backup destination add <name> --bucket= --key= --secret= [--region=] [--endpoint=]`**: another bucket with its own credentials, on any S3-compatible endpoint as for the default. Without flags the values are asked. The bucket is listed with those credentials **before** anything is saved: a destination that cannot be reached would fail every run of every profile naming it. Also `edit`, `show`, `test` (reach every bucket, or one), `list` (local, `s3` and every named one, with the profiles using each) and `remove` (refused while a profile still names it; the archives in the bucket stay, and Cipi stops pruning them).
+- **A profile names any of them**: `--dest=local,s3,offsite`; in `cipi.yml`, `destinations: [s3, offsite]`. A name not configured on the server is refused by `profile add/edit` and blocks the `cipi.yml` plan, with the command to run.
+- **Every run uploads the same layout** (`cipi/<profile>/<timestamp>/`) to each bucket, with the credentials of each. Retention deletes a run from every destination that holds it; `cipi backup list` shows on which it is; `verify` and `fetch` take the first destination that has the run when there is no local copy; orphaned archives are pruned on every bucket. A failed upload names the destination (`dest:offsite`).
+- **The existing bucket is the default.** It stays in the top-level keys of `backup.json`, is `s3` in every profile, and keeps the credentials `cipi backup configure` wrote to `/root/.aws`. Named destinations live under `s3_destinations` and hand their keys to the AWS CLI per call. A server configured before this release carries on unchanged; `cipi backup configure` keeps the named destinations it finds, and `cipi backup status` lists them. `cipi help backup` and tab-completion know the commands.
+
+### Fixed — a PostgreSQL restore that failed was reported as done
+
+`cipi db restore <name> <file>` on a PostgreSQL database wipes the `public` schema and then feeds the dump to `psql` with `ON_ERROR_STOP=0`: psql went on after every failed statement and exited 0, so an incompatible or corrupted dump left the database **empty** while the command printed `'<name>' restored`. The same path runs the database copy of `cipi app clone` and the database step of `cipi sync import`.
+
+- psql now runs with `ON_ERROR_STOP=1`: it stops at the first failed statement and exits non-zero, which the callers already handle (`Restore failed` and exit 1; a warning in clone and sync). The MariaDB client has always stopped at the first error, so both engines now behave the same.
+- **The error is shown.** The client's output went to `/dev/null`, so `Restore failed` said nothing about what to fix. The first error line the client printed is now reported — `PostgreSQL restore: ERROR: relation "users" already exists` — for MariaDB as well.
+- **A dump that does not uncompress fails too.** The restore pipelines run with their own `pipefail`: a truncated or corrupted `.gz` no longer counts as restored because `psql` was fed an empty input.
+- **Dumps taken on a newer PostgreSQL keep restoring.** Stopping at the first error would have broken them: `pg_dump` 17 writes `SET transaction_timeout = 0;` in its preamble, which PostgreSQL 16 (Ubuntu 24.04) rejects as an unknown parameter, so the restore would have stopped on its first line with the database empty. That is a `cipi sync` from a 26.04 server to a 24.04 one, or a `cipi db restore` of a file made elsewhere. The preamble's `SET` lines whose parameter this server does not have (`pg_settings`) are dropped before `psql` sees them. Nothing past the preamble is touched: a `COPY` data line that happens to start with `SET` goes through as is. When the settings cannot be read, the dump passes unchanged.
+
+A dump made with `pg_dump --clean` but without `--if-exists` now fails at its first `DROP TABLE` — Cipi has already emptied the schema — and says so, where before those errors were skipped and the import went on. Cipi's own dumps (`pg_dump --no-owner --no-acl`) are not affected.
+
+### Fixed — a cron expression with a newline passed `cipi.yml` validation
+
+The `cron:` validator of `cipi.yml` (`crons:` and `backup.profiles[].cron`) allowed `\s`, which matches a newline and a tab, not just a space. A double-quoted YAML value such as `cron: "0 0 1 1\n*"` passed — five fields, every character allowed — and was written as is into the app user's crontab, where the newline split the line in two and `crontab` refused the **whole** managed block: every scheduled command of the app stopped, from a file that comes from the repository. The same character class guarded `cipi backup profile add --cron=`.
+
+- Only a plain space between fields, everywhere: a newline, a tab and trailing garbage (`0 0 * * *;id`) are refused with the usual `expected five cron fields` error. Valid five-field expressions (`*/5 0-6,18 * * 1-5`) are unchanged.
+- The expression is stored with one space between fields, so the crontab line Cipi writes always reads the same as the one it compares against on the next `cipi yml plan`.
+
+No migration: `crontab` itself refused a block containing such a line, so no installed app carries one.
+
+No migration for this release: a server configured before it keeps working as it is.
+
+---
+
 ## [5.5.2] — 2026-10-09
 
 ### Changed — `cipi disk` is available to the panel API

@@ -1110,6 +1110,183 @@ git_setup_repo() {
     fi
 }
 
+# ── REPOSITORY ACCESS ────────────────────────────────────────
+#
+# Can the app actually read its repository with the deploy key? Checked as soon
+# as the key is in place (app create, app edit --repository / --branch, cipi git
+# check): a clone that fails at the first deploy is the wrong moment to learn
+# that the token had expired or the key was never added.
+
+# git ls-remote as the app user, with the identity Deployer uses. Returns 0
+# when the branch exists, 2 when the repository answers but has no such branch,
+# 1 when it cannot be read at all. The last line git printed is left in
+# GIT_ACCESS_ERROR. A key the forge has just accepted can take a moment to
+# serve, so a refused read is tried once more.
+_git_ls_remote() {
+    local app="$1" repository="$2" branch="${3:-main}"
+    local home="/home/${app}" out rc attempt
+    local ssh_cmd="ssh -i ${home}/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=15"
+    GIT_ACCESS_ERROR=""
+    for attempt in 1 2; do
+        rc=0
+        out=$(timeout 60 sudo -u "$app" -H env GIT_SSH_COMMAND="$ssh_cmd" GIT_TERMINAL_PROMPT=0 \
+            git ls-remote --exit-code --heads "$repository" "refs/heads/${branch}" 2>&1) || rc=$?
+        [[ $rc -eq 0 ]] && return 0
+        [[ $rc -eq 2 ]] && return 2
+        # The line that says why: GitHub's "ERROR: Repository not found." comes
+        # first, before the generic "Please make sure you have the correct
+        # access rights" tail; ssh's "Permission denied (publickey)" likewise.
+        GIT_ACCESS_ERROR=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | grep -v '^Warning: Permanently added' \
+            | grep -m1 -E 'ERROR|Permission denied|Host key|Could not resolve|Connection|denied|not found|No such|timed out|does not exist' \
+            || printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | grep -v '^Warning: Permanently added' | head -1)
+        [[ $rc -eq 124 ]] && GIT_ACCESS_ERROR="no answer from the git host within 60s"
+        [[ $attempt -eq 1 ]] && sleep 3
+    done
+    return 1
+}
+
+# Check, report, and on a terminal offer the fix. Sets GIT_REPO_ACCESS to
+# ok | nobranch | denied for the caller's summary. Returns 0 only for ok.
+#
+# Usage: git_verify_repo_access <app> <repository> <branch> [<domain> <webhook_token> <pub_key> [skip_webhook]]
+# With a public key, a refused read on a forge Cipi knows offers to save (or
+# replace) that forge's token, runs git_setup_repo again — deploy key and
+# webhook — and checks once more. The caller saves GIT_PROVIDER /
+# GIT_DEPLOY_KEY_ID / GIT_WEBHOOK_ID afterwards, as after git_setup_repo.
+# shellcheck disable=SC2034  # GIT_REPO_ACCESS is read by the app create summary (app.sh)
+git_verify_repo_access() {
+    local app="$1" repository="$2" branch="${3:-main}"
+    local domain="${4:-}" webhook_token="${5:-}" pub_key="${6:-}" skip_webhook="${7:-}"
+    GIT_REPO_ACCESS=""
+    [[ -z "$repository" ]] && return 0
+    local provider label rc
+    provider=$(_git_detect_provider "$repository")
+    label=$(_git_provider_label "${provider:-git}")
+    [[ -z "$provider" ]] && label="the git host"
+
+    step "Repository access..."
+    _git_ls_remote "$app" "$repository" "$branch"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        success "Repository reachable — branch '${branch}' found"
+        GIT_REPO_ACCESS="ok"; return 0
+    fi
+    if [[ $rc -eq 2 ]]; then
+        warn "Repository reachable, but it has no branch '${branch}'"
+        info "Pick an existing one: cipi app edit ${app} --branch=<name>"
+        GIT_REPO_ACCESS="nobranch"; return 1
+    fi
+
+    warn "Cannot read the repository with the deploy key${GIT_ACCESS_ERROR:+: ${GIT_ACCESS_ERROR}}"
+    GIT_REPO_ACCESS="denied"
+
+    # The fix, on a terminal: a token for the forge, then the key goes in by itself.
+    if [[ -t 0 && -n "$pub_key" && -n "$provider" && "$provider" != "codecommit" ]]; then
+        local question
+        if _git_provider_ready "$provider"; then
+            question="The ${label} token may have expired or not cover this repository. Replace it and retry?"
+        else
+            question="No ${label} token is saved. Save one now and retry? (Cipi then adds the deploy key for you)"
+        fi
+        if confirm "$question"; then
+            local token
+            echo -e -n "${CYAN}${label} token${NC}: "; read -rs token; echo ""
+            if [[ -n "$token" ]]; then
+                _git_set_named_token "${provider}_token" "$label" "cipi git ${provider}-token <token>" "$token"
+                git_setup_repo "$app" "$repository" "$domain" "$webhook_token" "$pub_key" "$skip_webhook"
+                step "Repository access..."
+                _git_ls_remote "$app" "$repository" "$branch"; rc=$?
+                if [[ $rc -eq 0 ]]; then
+                    success "Repository reachable — branch '${branch}' found"
+                    GIT_REPO_ACCESS="ok"; return 0
+                elif [[ $rc -eq 2 ]]; then
+                    warn "Repository reachable, but it has no branch '${branch}'"
+                    info "Pick an existing one: cipi app edit ${app} --branch=<name>"
+                    GIT_REPO_ACCESS="nobranch"; return 1
+                fi
+                warn "Still cannot read the repository${GIT_ACCESS_ERROR:+: ${GIT_ACCESS_ERROR}}"
+            else
+                info "No token entered"
+            fi
+        fi
+    fi
+
+    # What to do, for a script or a declined prompt.
+    if [[ -n "$provider" && "$provider" != "codecommit" ]]; then
+        if _git_provider_ready "$provider"; then
+            info "Renew the ${label} token, then re-register the key:"
+            info "  $(_git_token_hint "$provider") && cipi git refresh ${app}"
+        else
+            info "Save a ${label} token and Cipi adds the deploy key for you:"
+            info "  $(_git_token_hint "$provider") && cipi git refresh ${app}"
+        fi
+    elif [[ "$provider" == "codecommit" ]]; then
+        if _git_provider_ready "$provider"; then
+            info "Check the IAM user and its SSH keys (five at most), then: cipi git refresh ${app}"
+        else
+            info "Save the IAM credentials and Cipi uploads the key: $(_git_token_hint "$provider") && cipi git refresh ${app}"
+        fi
+    else
+        info "Add the deploy key to the repository (cipi deploy ${app} --key shows it)"
+        info "A host on a non-standard port or an unknown host key: cipi deploy ${app} --trust-host=<host[:port]>"
+    fi
+    info "Check again at any time: cipi git check ${app}"
+    return 1
+}
+
+# cipi git check [app] — the same check for one app, or for every app with a
+# repository. Without an app no token is offered; a token is saved once and
+# `cipi git refresh` covers the rest.
+_git_check() {
+    local target="${1:-}"
+    if [[ -n "$target" ]]; then
+        app_exists "$target" || { error "App '${target}' not found"; exit 1; }
+        local repository branch pub_key="" custom skip=""
+        repository=$(app_get "$target" repository)
+        [[ -z "$repository" ]] && { info "${target}: no git repository"; return 0; }
+        branch=$(app_get "$target" branch)
+        custom=$(app_get "$target" custom)
+        [[ -f "/home/${target}/.ssh/id_ed25519.pub" ]] && pub_key=$(cat "/home/${target}/.ssh/id_ed25519.pub")
+        [[ "$custom" == "true" && "$(app_get "$target" runtime)" != "node" ]] && skip="skip_webhook"
+        echo -e "\n${BOLD}${target}${NC} ${DIM}${repository} (${branch:-main})${NC}"
+        if git_verify_repo_access "$target" "$repository" "${branch:-main}" \
+                "$(app_get "$target" domain)" "$(app_get "$target" webhook_token)" "$pub_key" "$skip"; then
+            [[ -n "${GIT_PROVIDER:-}" ]] && git_save_app_data "$target" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
+            return 0
+        fi
+        [[ -n "${GIT_PROVIDER:-}" ]] && git_save_app_data "$target" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
+        exit 1
+    fi
+
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || { info "No apps"; return 0; }
+    local apps app ok=0 fail=0 none=0
+    apps=$(vault_read apps.json | jq -r 'keys[]')
+    [[ -z "$apps" ]] && { info "No apps"; return 0; }
+    echo -e "\n${BOLD}Repository access${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        local repository branch
+        repository=$(app_get "$app" repository)
+        if [[ -z "$repository" ]]; then
+            none=$((none + 1)); continue
+        fi
+        branch=$(app_get "$app" branch)
+        echo -e "\n${BOLD}${app}${NC} ${DIM}${repository} (${branch:-main})${NC}"
+        if git_verify_repo_access "$app" "$repository" "${branch:-main}"; then
+            ok=$((ok + 1))
+        else
+            fail=$((fail + 1))
+        fi
+    done <<< "$apps"
+    echo ""
+    [[ $none -gt 0 ]] && info "${none} app(s) without a repository skipped"
+    if [[ $fail -gt 0 ]]; then
+        error "${fail} app(s) cannot read their repository, ${ok} can"
+        exit 1
+    fi
+    success "Every app with a repository can read it (${ok})"
+}
+
 # Remove deploy key + webhook from git provider
 git_cleanup_repo() {
     local app="$1" repository="$2"
@@ -1687,6 +1864,7 @@ _git_status() {
     echo "    cipi git remove-codecommit                 Remove CodeCommit credentials"
     echo "    cipi git refresh [app]                     Re-sync deploy keys + webhooks"
     echo "                                               [--rotate-keys] [--rotate-secret]"
+    echo "    cipi git check [app]                       Can the deploy key read the repository?"
     echo ""
 }
 
@@ -1707,11 +1885,12 @@ git_command() {
         remove-azure)      _git_remove_azure_token ;;
         remove-codecommit) _git_remove_codecommit_token ;;
         refresh)           _git_refresh "$@" ;;
+        check)             _git_check "$@" ;;
         status|"")         _git_status ;;
         *) error "Unknown: $sub"
            echo "Use: github-token gitlab-token gitlab-url origin-token bitbucket-token azure-token codecommit-token"
            echo "     remove-github remove-gitlab remove-origin remove-bitbucket remove-azure remove-codecommit"
-           echo "     refresh status"
+           echo "     refresh check status"
            exit 1 ;;
     esac
 }
