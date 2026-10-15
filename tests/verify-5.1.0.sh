@@ -114,6 +114,8 @@ source LIBDIR/backup.sh
 _bk_valid_cron "0 2 * * *"        || exit 10
 _bk_valid_cron "0 2 * * * ; evil" && exit 11
 _bk_valid_cron "0 2 * *"          && exit 12
+_bk_valid_cron $'0 2 * *\n*'       && exit 28   # a newline splits the crontab line
+_bk_valid_cron $'0 2\t* * *'       && exit 29
 [[ "$(_bk_every_to_cron 30m)" == "1800	*/30 * * * *" ]] || exit 13
 [[ "$(_bk_every_to_cron 6h)"  == "21600	0 */6 * * *" ]]  || exit 14
 _bk_every_to_cron 7m  && exit 15
