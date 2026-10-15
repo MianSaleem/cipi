@@ -3155,7 +3155,7 @@ _yml_post_deploy_exec() {
             fi
             [[ -f "${wd}/artisan" ]] || { error "  artisan not found in ${wd}"; return 1; }
             cmd_q=$(printf '%q' "/usr/bin/php${php_ver}")
-            args_q="artisan"
+            args_q=" artisan"
             local a
             for a in "${argv[@]}"; do args_q+=" $(printf '%q' "$a")"; done
             ;;
@@ -3212,8 +3212,8 @@ _yml_post_deploy_run() {
         _yml_post_deploy_log "post-deploy [$((i+1))/${n}]: ${line}"
 
         step_rc=0
-        if ! _yml_post_deploy_exec "$as" "$app" "$php_ver" "$run" "${argv[@]}" >>"${lf:-/dev/null}" 2>&1; then
-            step_rc=$?
+        _yml_post_deploy_exec "$as" "$app" "$php_ver" "$run" "${argv[@]}" >>"${lf:-/dev/null}" 2>&1 || step_rc=$?
+        if [[ $step_rc -ne 0 ]]; then
             ((failed++)) || true
             _yml_post_deploy_log "post-deploy FAILED (${step_rc}): ${line}"
             [[ "$quiet" != "true" ]] && error "  failed (exit ${step_rc}): ${line}"

@@ -4,6 +4,22 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.6.1] — 2026-10-15
+
+### Fixed — `deploy.post` artisan steps never ran
+
+Every `artisan` step declared under `deploy.post` failed with `bash: /usr/bin/php8.5artisan: No such file or directory`: the runner glued the PHP binary and `artisan` together without a space. `npm`, `composer`, `php` and the other runners were not affected. The steps now run as `/usr/bin/phpX.Y artisan …` from the live release, on `cipi deploy`, on the Git webhook and with `cipi yml post-deploy`.
+
+### Fixed — a failed post-deploy step reports its exit code, and `abort` aborts
+
+The log always said `post-deploy FAILED (0)`, because the exit code was read after the `!` that negated it. With `post_on_failure: abort` that 0 was also what the step returned, so the deploy did not fail. The log and the alert now carry the step's real exit code, and `abort` makes `cipi deploy` fail with it.
+
+### Migration
+
+None. The self-update copies `lib/yml.sh`; the next deploy runs the steps.
+
+---
+
 ## [5.6.0] — 2026-10-15
 
 Four suggestions from users, in one release: a guided `cipi app create`, the asset build asked at creation, the deploy key tested on the spot, and backup profiles that ship to several buckets. Two fixes come with them: a PostgreSQL restore that failed is no longer reported as done, and a `cipi.yml` cron expression with a newline no longer passes validation. Bitbucket Cloud and Azure DevOps, also suggested, have been supported since 5.2.3 (`cipi git bitbucket-token`, `cipi git azure-token`); the app create summary now names them in its deploy-key hints.
