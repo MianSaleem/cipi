@@ -43,6 +43,7 @@ The app-created mail reports `Repository access` and `Build`.
 - **A profile names any of them**: `--dest=local,s3,offsite`; in `cipi.yml`, `destinations: [s3, offsite]`. A name not configured on the server is refused by `profile add/edit` and blocks the `cipi.yml` plan, with the command to run.
 - **Every run uploads the same layout** (`cipi/<profile>/<timestamp>/`) to each bucket, with the credentials of each. Retention deletes a run from every destination that holds it; `cipi backup list` shows on which it is; `verify` and `fetch` take the first destination that has the run when there is no local copy; orphaned archives are pruned on every bucket. A failed upload names the destination (`dest:offsite`).
 - **The existing bucket is the default.** It stays in the top-level keys of `backup.json`, is `s3` in every profile, and keeps the credentials `cipi backup configure` wrote to `/root/.aws`. Named destinations live under `s3_destinations` and hand their keys to the AWS CLI per call. A server configured before this release carries on unchanged; `cipi backup configure` keeps the named destinations it finds, and `cipi backup status` lists them. `cipi help backup` and tab-completion know the commands.
+- **`cipi backup profile list` lines up.** Its columns had fixed widths, so a profile name longer than 16 characters (`cernuscoinsieme-db-quarterly`) or a list of destinations pushed the rest of the row out of line. The widths now follow the longest value in each column.
 
 ### Fixed — a PostgreSQL restore that failed was reported as done
 

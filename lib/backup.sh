@@ -430,9 +430,12 @@ _bk_profile_list() {
     [[ -z "$names" ]] && { info "No backup profiles. Create one: cipi backup profile add <name> ..."; return 0; }
 
     local state; state=$(_bk_state)
-    echo -e "\n${BOLD}Backup profiles${NC}"
-    printf "  ${BOLD}%-16s %-6s %-15s %-12s %-14s %s${NC}\n" "PROFILE" "SCOPE" "SCHEDULE" "DEST" "RETENTION" "LAST RUN"
-    local p scope cron dest ret enc last status
+
+    # Rows first, then the widths: profile names go up to 32 characters and a
+    # profile may list several destinations, so fixed columns break the table.
+    local -a r_p=() r_scope=() r_cron=() r_dest=() r_ret=() r_last=() r_col=() r_flag=()
+    local w_p=7 w_scope=5 w_cron=8 w_dest=4 w_ret=9
+    local p scope cron dest ret enc last status col flag
     while IFS= read -r p; do
         [[ -n "$p" ]] || continue
         scope=$(_bk_profile_get "$p" scope)
@@ -442,15 +445,30 @@ _bk_profile_list() {
         enc=$(_bk_profile_get "$p" encrypt)
         last=$(echo "$state" | jq -r --arg p "$p" '.[$p].last_end // "never"')
         status=$(echo "$state" | jq -r --arg p "$p" '.[$p].status // ""')
-        local flag=""
+        flag=""
         [[ "$(_bk_profile_get "$p" enabled)" == "false" ]] && flag=" ${DIM}(disabled)${NC}"
         [[ "$enc" == "true" ]] && dest="${dest}+enc"
-        local col="$NC"
+        col="$NC"
         [[ "$status" == "error" ]] && col="$RED"
         [[ "$status" == "ok" ]] && col="$GREEN"
-        printf "  ${CYAN}%-16s${NC} %-6s %-15s %-12s %-14s ${col}%s${NC}%b\n" \
-            "$p" "$scope" "$cron" "$dest" "$ret" "$last" "$flag"
+        r_p+=("$p"); r_scope+=("$scope"); r_cron+=("$cron"); r_dest+=("$dest")
+        r_ret+=("$ret"); r_last+=("$last"); r_col+=("$col"); r_flag+=("$flag")
+        (( ${#p} > w_p ))         && w_p=${#p}
+        (( ${#scope} > w_scope )) && w_scope=${#scope}
+        (( ${#cron} > w_cron ))   && w_cron=${#cron}
+        (( ${#dest} > w_dest ))   && w_dest=${#dest}
+        (( ${#ret} > w_ret ))     && w_ret=${#ret}
     done <<< "$names"
+
+    echo -e "\n${BOLD}Backup profiles${NC}"
+    printf "  ${BOLD}%-*s  %-*s  %-*s  %-*s  %-*s  %s${NC}\n" \
+        "$w_p" "PROFILE" "$w_scope" "SCOPE" "$w_cron" "SCHEDULE" "$w_dest" "DEST" "$w_ret" "RETENTION" "LAST RUN"
+    local i
+    for i in "${!r_p[@]}"; do
+        printf "  ${CYAN}%-*s${NC}  %-*s  %-*s  %-*s  %-*s  ${r_col[$i]}%s${NC}%b\n" \
+            "$w_p" "${r_p[$i]}" "$w_scope" "${r_scope[$i]}" "$w_cron" "${r_cron[$i]}" \
+            "$w_dest" "${r_dest[$i]}" "$w_ret" "${r_ret[$i]}" "${r_last[$i]}" "${r_flag[$i]}"
+    done
     echo ""
     echo -e "  ${DIM}Details: cipi backup profile show <name>${NC}"
     echo ""

@@ -415,6 +415,14 @@ out=$(bk _bk_destination_test); rc=$?
 [[ $rc -ne 0 ]] && grep -q 'AccessDenied' <<< "$out" && grep -q 'reachable' <<< "$out" \
     && pass "destination test reaches each bucket and fails on the broken one" || fail "test: rc=${rc} ${out}"
 rm -f "${TMP}/aws.failbucket"
+# profile list: columns sized from the data — a long name or several
+# destinations must not push the rest of the row out of line
+jq '.profiles["shop-db-quarterly-long"] = (.profiles.nightly | .destinations = ["local","s3","offsite"])' \
+    "${TMP}/backup.json" > "${TMP}/backup.json.tmp" && mv "${TMP}/backup.json.tmp" "${TMP}/backup.json"
+out=$(bk _bk_profile_list)
+cols=$(grep -E '^  (PROFILE|nightly|shop-db-quarterly-long) ' <<< "$out" | awk '{ match($0, /^  [^ ]+ +/); print RLENGTH }' | sort -u | wc -l)
+[[ "$cols" -eq 1 ]] && grep -q 'local,s3,offsite' <<< "$out" \
+    && pass "profile list: columns line up whatever the name length" || fail "profile list alignment: ${out}"
 out=$(bk _bk_status)
 grep -q 'offsite' <<< "$out" && grep -q 'S3 (s3)' <<< "$out" && pass "backup status lists named destinations" || fail "status: ${out}"
 grep -q '"s3_destinations":$d' "${LIB}/backup.sh" && pass "cipi backup configure keeps the named destinations" || fail "configure drops s3_destinations"
