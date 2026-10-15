@@ -432,6 +432,42 @@ grep -q 'destination|destinations|dest) _bk_destination_command' "${LIB}/backup.
     && pass "cipi backup destination is dispatched, in help and completion" || fail "destination wiring"
 grep -q '_aws_s3 cp "${tmp}/"' "${LIB}/backup.sh" && fail "the run still uploads with the default profile only" || pass "no upload bypasses the destination"
 
+# ── cipi db create: engine menu ──────────────────────────────
+echo "-- cipi db create: MariaDB or PostgreSQL menu"
+cat > "${TMP}/dbc.sh" <<EOF
+export CIPI_LIB="${LIB}" CIPI_CONFIG="${TMP}/cfg" CIPI_LOG="${TMP}/log"
+source "${LIB}/common.sh" 2>/dev/null
+source "${LIB}/db.sh"
+RED=; GREEN=; YELLOW=; CYAN=; DIM=; NC=; BOLD=
+db_ensure_engine_state(){ :; }
+db_engine_is_installed(){ [[ "\$1" == mariadb ]] || [[ ! -e "${TMP}/dbc.one" ]]; }
+db_get_default_engine(){ echo pgsql; }
+db_require_engine(){ echo "\$1"; }
+db_create_database(){ echo "CREATED engine=\$1 name=\$2"; }
+_db_meta_set(){ :; }; vault_read(){ echo '{}'; }; log_action(){ :; }; cipi_notify(){ :; }
+generate_password(){ echo pw; }; step(){ :; }
+_db_create "\$@"
+EOF
+printf '\n' > "${TMP}/in"; out=$(ptyrun "${TMP}/in" 10 bash "${TMP}/dbc.sh" --name=shopdb)
+grep -q 'Database engine' <<< "$out" && grep -q 'pgsql.*(default)' <<< "$out" && grep -q 'CREATED engine=pgsql name=shopdb' <<< "$out" \
+    && pass "on a terminal the engine is a menu, Enter takes the server default" || fail "db create menu default: ${out}"
+printf '1\n' > "${TMP}/in"; out=$(ptyrun "${TMP}/in" 10 bash "${TMP}/dbc.sh" --name=shopdb)
+grep -q 'CREATED engine=mariadb name=shopdb' <<< "$out" && pass "a number picks the other engine" || fail "db create menu pick: ${out}"
+printf '1\nshopdb\n' > "${TMP}/in"; out=$(ptyrun "${TMP}/in" 10 bash "${TMP}/dbc.sh")
+m=$(grep -n 'Database engine' <<< "$out" | head -1 | cut -d: -f1); n=$(grep -n 'Database name' <<< "$out" | head -1 | cut -d: -f1)
+[[ -n "$m" && -n "$n" && "$m" -lt "$n" ]] && grep -q 'CREATED engine=mariadb name=shopdb' <<< "$out" \
+    && pass "the engine is asked before the name" || fail "db create order: ${out}"
+printf '\n' > "${TMP}/in"; out=$(ptyrun "${TMP}/in" 10 bash "${TMP}/dbc.sh" --name=shopdb --engine=mariadb)
+! grep -q 'Database engine' <<< "$out" && grep -q 'CREATED engine=mariadb' <<< "$out" \
+    && pass "--engine skips the menu" || fail "db create --engine: ${out}"
+out=$(bash "${TMP}/dbc.sh" --name=shopdb </dev/null 2>&1)
+! grep -q 'Database engine' <<< "$out" && grep -q 'CREATED engine=pgsql' <<< "$out" \
+    && pass "without a terminal the default engine, no menu" || fail "db create non-tty: ${out}"
+touch "${TMP}/dbc.one"
+printf '\n' > "${TMP}/in"; out=$(ptyrun "${TMP}/in" 10 bash "${TMP}/dbc.sh" --name=shopdb)
+! grep -q 'Database engine' <<< "$out" && pass "one engine installed: nothing to choose" || fail "db create one engine: ${out}"
+rm -f "${TMP}/dbc.one"
+
 # ── tables: columns sized from the data ──────────────────────
 echo "-- tables: columns follow the longest value"
 bash -n "${LIB}/table.sh" && pass "table.sh parses" || fail "table.sh does not parse"

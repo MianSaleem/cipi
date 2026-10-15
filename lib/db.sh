@@ -818,6 +818,17 @@ _db_engines() {
 _db_create() {
     parse_args "$@"
     local engine
+    # Wizard: no --engine on a terminal and both engines installed → a menu,
+    # the server default pre-selected (same as cipi app create). Asked here,
+    # not inside $(…), where the menu would not be seen.
+    if [[ -z "${ARG_engine:-}" && -t 0 ]]; then
+        db_ensure_engine_state
+        if db_engine_is_installed mariadb && db_engine_is_installed pgsql; then
+            local choice
+            read_choice "Database engine" "$(db_get_default_engine)" choice "mariadb|MariaDB" "pgsql|PostgreSQL"
+            ARG_engine="$choice"
+        fi
+    fi
     engine=$(db_resolve_engine_arg) || exit 1
 
     local name="${ARG_name:-}" user="${ARG_user:-}"

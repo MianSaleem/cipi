@@ -408,6 +408,7 @@ show_help_topic() {
             _help_cmd "cipi db upgrade [engine]"       "Patch MariaDB / PostgreSQL  ${DIM}[--yes]${NC}"
             _help_note "Omitting the engine upgrades every installed one. Brief downtime."
             _help_cmd "cipi db create"                 "Create database  ${DIM}[--engine=]${NC}"
+            _help_note "Without --engine and with both engines installed, a menu asks MariaDB or PostgreSQL."
             _help_cmd "cipi db list"                   "List databases  ${DIM}[--engine=]${NC}"
             _help_cmd "cipi db delete <name>"          "Delete database  ${DIM}[--engine=]${NC}"
             _help_cmd "cipi db backup <name>"          "Backup database  ${DIM}[--engine=]${NC}"

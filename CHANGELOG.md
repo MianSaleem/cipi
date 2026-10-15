@@ -19,6 +19,8 @@ The wizard asked for a username before anything else, and the choice that shapes
 
 Then the details as before: username, domain, repository, branch, PHP version. Any type flag skips the menus. Without a terminal (the panel API, a script) every default applies and nothing is printed, so the non-interactive form is unchanged.
 
+`cipi db create` asks the engine the same way: without `--engine`, on a terminal and with both engines installed, a menu — MariaDB or PostgreSQL, the server default (`cipi db default`) pre-selected — comes before the database name. A script or a server with one engine gets the default, as before.
+
 ### Added — the asset build is asked at creation
 
 The build most Laravel apps need (`npm ci && npm run build`) could only be set afterwards, with `cipi app edit --node-build` or `deploy.node_build` in `cipi.yml`, so the first deploy shipped without compiled assets. The wizard now asks for it after the PHP version — **Build command**, empty for none — and `--node-build=CMD` sets it without a prompt. It is stored as `node_build`, written to `.deployer/node-build.sh`, run by the recipe inside every deploy after `composer install` and before the release goes live, and shown in the summary (`Build:`). The allowlist of the edit command applies: npm, npx, yarn, pnpm, bun or node, no shell syntax. Node apps keep `--build=`; custom apps have no build step. `deploy.post` in `cipi.yml` remains the place for steps that run after the release is live.
