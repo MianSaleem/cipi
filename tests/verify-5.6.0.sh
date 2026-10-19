@@ -621,10 +621,20 @@ export PATH="${TMP}/bin:\$PATH"
 source "${LIB}/db.sh"
 # stubs after the source, which defines the real ones
 db_get_root_password(){ echo pw; }
-_db_pgsql_exec(){ echo "\$*" >> "${TMP}/pgexec"; }
 db_restore_database "\$@"
 EOS
 restore() { rm -f "${TMP}/errors" "${TMP}/psql.in" "${TMP}/psql.args" "${TMP}/mariadb.in"; bash "${TMP}/rs.sh" "$@"; }
+# What psql was fed: BEGIN, the wipe, the owner, the dump, COMMIT. framed: the
+# session is that one transaction. body: the dump part of it. committed: a
+# COMMIT went out, so whatever came before it is now in the database.
+framed() {
+    [[ "$(sed -n 1p "${TMP}/psql.in")" == "BEGIN;" ]] \
+        && sed -n 2p "${TMP}/psql.in" | grep -q '^DROP SCHEMA public CASCADE; CREATE SCHEMA public;$' \
+        && sed -n 3p "${TMP}/psql.in" | grep -q 'ALTER SCHEMA public OWNER TO %I.*pg_get_userbyid(datdba)' \
+        && [[ "$(tail -n1 "${TMP}/psql.in")" == "COMMIT;" ]]
+}
+body() { sed '1,3d;$d' "${TMP}/psql.in"; }
+committed() { grep -q '^COMMIT;$' "${TMP}/psql.in" 2>/dev/null; }
 
 # A pg_dump 17 preamble (unknown transaction_timeout) and a body with traps:
 # a COPY data line that looks like SET, and a SET past the preamble whose
@@ -665,11 +675,14 @@ grep -v '^SET transaction_timeout = 0;$' "${TMP}/dump.sql" > "${TMP}/expected.sq
 rm -f "${TMP}/psql.fail" "${TMP}/settings.off"
 if restore pgsql shop "${TMP}/dump.sql"; then pass "pgsql restore succeeds"; else fail "pgsql restore failed (exit $?)"; fi
 grep -q 'ON_ERROR_STOP=1' "${TMP}/psql.args" && pass "psql runs with ON_ERROR_STOP=1" || fail "psql args: $(cat "${TMP}/psql.args")"
-grep -q 'DROP SCHEMA public CASCADE' "${TMP}/pgexec" && pass "public schema wiped before the import" || fail "schema not wiped"
-if cmp -s "${TMP}/psql.in" "${TMP}/expected.sql"; then
+framed && pass "wipe, owner and dump in one transaction, COMMIT last" \
+    || fail "session not framed: $(head -3 "${TMP}/psql.in" | cut -c1-60 | tr '\n' '|') ... $(tail -n1 "${TMP}/psql.in")"
+! grep -q 'OWNER TO "shop"' "${TMP}/psql.in" && pass "schema goes to the database's owner, not to a role named after the database" \
+    || fail "schema given to a role named after the database"
+if cmp -s <(body) "${TMP}/expected.sql"; then
     pass "preamble SET of a parameter this server lacks is dropped; the rest is untouched"
 else
-    fail "filtered dump differs: $(diff "${TMP}/expected.sql" "${TMP}/psql.in" | head -5 | tr '\n' '|')"
+    fail "filtered dump differs: $(diff "${TMP}/expected.sql" <(body) | head -5 | tr '\n' '|')"
 fi
 grep -q '^SET weird_param = 1;$' "${TMP}/psql.in" && pass "COPY data line starting with SET goes through" || fail "COPY data line dropped"
 grep -q "^SET default_tablespace = '';$" "${TMP}/psql.in" && pass "SET past the preamble goes through" || fail "body SET dropped"
@@ -677,12 +690,12 @@ grep -q '^\\restrict k3y$' "${TMP}/psql.in" && pass "\\restrict kept" || fail "\
 [[ ! -e "${TMP}/errors" ]] && pass "no error printed on success" || fail "error printed on success: $(cat "${TMP}/errors")"
 
 gzip -c "${TMP}/dump.sql" > "${TMP}/dump.sql.gz"
-if restore pgsql shop "${TMP}/dump.sql.gz" && cmp -s "${TMP}/psql.in" "${TMP}/expected.sql"; then
+if restore pgsql shop "${TMP}/dump.sql.gz" && framed && cmp -s <(body) "${TMP}/expected.sql"; then
     pass "gzipped dump restored through the same filter"
-else fail "gzipped dump: exit $? / $(diff "${TMP}/expected.sql" "${TMP}/psql.in" | head -3 | tr '\n' '|')"; fi
+else fail "gzipped dump: exit $? / $(diff "${TMP}/expected.sql" <(body) | head -3 | tr '\n' '|')"; fi
 
 touch "${TMP}/settings.off"
-if restore pgsql shop "${TMP}/dump.sql" && cmp -s "${TMP}/psql.in" "${TMP}/dump.sql"; then
+if restore pgsql shop "${TMP}/dump.sql" && framed && cmp -s <(body) "${TMP}/dump.sql"; then
     pass "settings unreadable: the dump passes unchanged"
 else fail "settings unreadable: dump altered or restore failed"; fi
 rm -f "${TMP}/settings.off"
@@ -698,6 +711,23 @@ printf 'this is not gzip\n' > "${TMP}/bad.sql.gz"
 if restore pgsql shop "${TMP}/bad.sql.gz"; then fail "a dump that does not uncompress reported as restored"
 else pass "a dump that does not uncompress fails"; fi
 grep -qi 'gzip' "${TMP}/errors" 2>/dev/null && pass "gunzip's error is shown" || fail "gunzip error not shown: $(cat "${TMP}/errors" 2>/dev/null)"
+! committed && pass "no COMMIT after a dump that does not uncompress: the wipe rolls back" || fail "COMMIT sent after a broken archive"
+
+# A dump that holds nothing must not commit the wipe. The file's size cannot
+# tell: a backup taken while pg_dump failed is a valid 20-byte archive of
+# nothing (db_dump_database gzips whatever pg_dump left, errors discarded).
+: | gzip > "${TMP}/nothing.sql.gz"
+if restore pgsql shop "${TMP}/nothing.sql.gz"; then fail "an archive of nothing reported as restored"
+else pass "an archive of nothing fails"; fi
+! committed && pass "no COMMIT after an archive of nothing: the wipe rolls back" || fail "COMMIT sent after an archive of nothing"
+grep -q 'PostgreSQL restore: the dump is empty' "${TMP}/errors" 2>/dev/null && pass "the empty dump is named as the reason" \
+    || fail "reason not shown: $(cat "${TMP}/errors" 2>/dev/null)"
+: > "${TMP}/zero.sql"
+if restore pgsql shop "${TMP}/zero.sql" || committed; then fail "a zero-byte dump committed the wipe"
+else pass "a zero-byte dump fails without COMMIT"; fi
+printf '\n  \n' > "${TMP}/blank.sql"
+if restore pgsql shop "${TMP}/blank.sql" || committed; then fail "a blank dump committed the wipe"
+else pass "a blank dump fails without COMMIT"; fi
 
 printf 'CREATE TABLE t (id int);\n' > "${TMP}/m.sql"
 rm -f "${TMP}/mariadb.fail"

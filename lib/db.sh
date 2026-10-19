@@ -459,24 +459,33 @@ _db_dump_cat() {
 # whose parameter this server does not have are dropped. Nothing past the
 # preamble is touched, so a COPY data line that happens to start with "SET "
 # goes through as is. When the settings cannot be read the dump passes unchanged.
+#
+# A dump that holds nothing is refused (exit 1, "the dump is empty"): a backup
+# taken while pg_dump failed is a valid archive of nothing, since
+# db_dump_database sends pg_dump's errors to /dev/null and gzips what is left,
+# and the file's size cannot tell it from a real dump. The restore commits only
+# after this filter has passed the whole stream, so such a file never commits a
+# bare wipe. The check is on the stream, in the same pass: the file is read once.
 _db_pgsql_restore_filter() {
     local dbr="$1" known
     # One line, space-separated: BSD awk refuses a newline in a -v value.
     known=$(PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d postgres -tAc \
         "SELECT name FROM pg_settings" 2>/dev/null | tr '\n' ' ')
-    if [[ -z "${known// /}" ]]; then cat; return; fi
     awk -v known="$known" '
-        BEGIN { n = split(known, k, " "); for (i = 1; i <= n; i++) if (k[i] != "") have[k[i]] = 1; pre = 1 }
+        BEGIN { n = split(known, k, " "); c = 0; for (i = 1; i <= n; i++) if (k[i] != "") { have[k[i]] = 1; c++ }; pre = (c > 0) }
+        /[^[:space:]]/ { seen = 1 }
         pre && /^SET [A-Za-z_.]+ = / { if (!($2 in have)) next; print; next }
         pre && (/^$/ || /^--/ || /^\\(un)?restrict/ || /^SELECT pg_catalog\.set_config\(/) { print; next }
         { pre = 0; print }
+        END { if (!seen) { print "the dump is empty" > "/dev/stderr"; exit 1 } }
     '
 }
 
 # The first error the client printed, so "Restore failed" says what to fix.
+# BSD gzip reports as "gunzip:", GNU as "gzip:" whatever name it was run by.
 _db_restore_say_why() {
     local engine="$1" errf="$2" line
-    line=$(grep -m1 -E 'ERROR|FATAL|error:|gzip:' "$errf" 2>/dev/null | tr -s ' ')
+    line=$(grep -m1 -E 'ERROR|FATAL|error:|g(un)?zip:' "$errf" 2>/dev/null | tr -s ' ')
     [[ -n "$line" ]] || line=$(grep -v '^[[:space:]]*$' "$errf" 2>/dev/null | tail -1)
     [[ -n "$line" ]] && error "$(db_engine_label "$engine") restore: ${line}"
     return 0
@@ -501,12 +510,20 @@ db_restore_database() {
             ;;
         pgsql)
             local dbr; dbr=$(db_get_root_password pgsql)
-            # Wipe public schema then restore (parity with drop/reimport)
-            _db_pgsql_exec -d "$name" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO \"${name}\"; ALTER SCHEMA public OWNER TO \"${name}\";" 2>/dev/null || true
+            # The public schema is wiped before the import (parity with
+            # drop/reimport). Wipe and import run in one transaction, and COMMIT
+            # is sent only once the whole dump has been read: a failed statement
+            # or a dump that breaks off (truncated .gz, read error) closes the
+            # session without it, so the wipe is rolled back and the database
+            # stays as it was. A dump that holds nothing would commit a bare
+            # wipe: the filter refuses it, so no COMMIT follows it either.
+            # The new schema goes to the database's owner, which is not named
+            # after the database when it was created with --user.
             ( set -o pipefail
-              _db_dump_cat "$file" 2>>"$err" \
-                | _db_pgsql_restore_filter "$dbr" \
-                | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>>"$err" ) || rc=$?
+              { printf '%s\n' "BEGIN;" "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" \
+                    "DO \$\$ BEGIN EXECUTE format('ALTER SCHEMA public OWNER TO %I', (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database())); END \$\$;"
+                _db_dump_cat "$file" 2>>"$err" | _db_pgsql_restore_filter "$dbr" 2>>"$err" && printf '%s\n' "COMMIT;"
+              } | PGPASSWORD="$dbr" psql -U postgres -h 127.0.0.1 -p 5432 -d "$name" -v ON_ERROR_STOP=1 >/dev/null 2>>"$err" ) || rc=$?
             ;;
         *) rm -f "${err:?}"; return 1 ;;
     esac
