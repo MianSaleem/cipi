@@ -4,6 +4,25 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.6.2] — 2026-10-20
+
+### Fixed — a failed PostgreSQL restore no longer empties the database
+
+`cipi db restore <name> <file>` on a PostgreSQL database dropped the `public` schema before the dump was read. A truncated `.gz`, an empty file or a statement failing halfway through left the database empty or half imported, even when the command reported failure. The same path runs the database copy of `cipi app clone` and the database step of `cipi sync import`.
+
+- **Wipe and import run in one transaction.** `COMMIT` is sent only after the whole dump has been read. Any failure closes the session without it, so the wipe rolls back and the database stays as it was.
+- **An empty dump is refused.** A backup taken while `pg_dump` failed is a valid archive of nothing — `db_dump_database` sends `pg_dump`'s errors to `/dev/null` and gzips what is left — and the file's size cannot tell it from a real dump. The check runs on the stream in the preamble filter's own pass; without one non-blank line the filter exits 1, so no `COMMIT` follows and the wipe rolls back. The file is read once either way.
+- **The new schema goes to the database owner**, not a role named after the database, which does not exist for databases created with `--user`.
+- **`Restore failed` names gunzip on BSD too**, where gzip reports as `gunzip:` rather than `gzip:`.
+
+Version 5.6.0 already stopped at the first failed statement, showed the error, rejected dumps that do not uncompress, and dropped preamble `SET` lines this server does not have. This release closes the gap where a failed restore could still leave PostgreSQL empty behind a failure message.
+
+### Migration
+
+None. The self-update copies `lib/db.sh`.
+
+---
+
 ## [5.6.1] — 2026-10-15
 
 ### Fixed — `deploy.post` artisan steps never ran
