@@ -467,6 +467,7 @@ request_slowlog_timeout = 30s
 catch_workers_output = yes
 php_admin_value[error_log] = /var/log/cipi-gui-php-error.log
 php_admin_value[open_basedir] = ${basedir}
+$(fpm_pool_hardening "$v")
 EOF
     for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
         [[ "$pv" == "$v" ]] && continue

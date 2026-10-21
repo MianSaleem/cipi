@@ -367,6 +367,71 @@ validate_php_version_known() {
 
 php_is_installed() { dpkg -l "php${1}-fpm" &>/dev/null 2>&1; }
 
+# True when version $1 is $2 or newer (dotted numbers: 8.5, 8.5.12).
+version_at_least() {
+    [[ -n "${1:-}" && -n "${2:-}" ]] || return 1
+    [[ "$(printf '%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]
+}
+
+# Oldest release of each PHP branch that carries every security fix Cipi
+# knows about. Raised with each PHP security release; the last one was
+# 2026-10-21 (CVE-2026-109618, CVE-2026-109619 — unauthenticated RCE).
+# Empty for branches the PHP project no longer patches (8.1 and older).
+php_security_floor() {
+    case "$1" in
+        8.2) echo "8.2.35" ;;
+        8.3) echo "8.3.36" ;;
+        8.4) echo "8.4.27" ;;
+        8.5) echo "8.5.12" ;;
+    esac
+}
+
+# Security state of an installed PHP branch, printed as "<state> <version>":
+#   patched     at or past php_security_floor
+#   vulnerable  older than the floor (ondrej / sury ship upstream versions,
+#               so the number is the whole story)
+#   distro      older than the floor, from the Ubuntu archive: Ubuntu
+#               backports fixes without raising the upstream version, so
+#               only the package changelog can tell
+#   eol         a branch the PHP project no longer patches
+#   unknown     the CLI binary for that branch is missing
+php_security_state() {
+    local v="$1" full floor pkg
+    full=$("php${v}" -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION, ".", PHP_RELEASE_VERSION;' 2>/dev/null || true)
+    [[ -n "$full" ]] || { echo "unknown -"; return 0; }
+    floor=$(php_security_floor "$v")
+    [[ -n "$floor" ]] || { echo "eol ${full}"; return 0; }
+    if version_at_least "$full" "$floor"; then
+        echo "patched ${full}"
+        return 0
+    fi
+    # Archive builds carry "-0ubuntu0.24.04.5"; ondrej and sury builds carry
+    # "+ubuntu24.04", and sury.org's do not say "sury" anywhere.
+    pkg=$(dpkg-query -W -f='${Version}' "php${v}-fpm" 2>/dev/null || true)
+    if [[ "$pkg" =~ -[0-9]+ubuntu[0-9] ]]; then
+        echo "distro ${full}"
+    else
+        echo "vulnerable ${full}"
+    fi
+}
+
+# Lines every PHP-FPM pool written by Cipi carries, whatever else it sets.
+# They follow the PHP security advisory of 2026-10-21: only the patch release
+# fixes CVE-2026-109619 (request state that outlives its memory), but these
+# close its two confirmed paths on a server that has not taken it yet.
+#   session.upload_progress.enabled  the session path
+#   fatal_error_backtraces           the fatal-error backtrace path; the key
+#                                    exists from 8.5 on, so it is written only
+#                                    where PHP knows it
+# Set at pool level as php_admin_flag: applied before the request is parsed,
+# and out of reach of .user.ini and ini_set(), which the advisory rules out.
+fpm_pool_hardening() {
+    echo "php_admin_flag[session.upload_progress.enabled] = off"
+    if version_at_least "$1" 8.5; then
+        echo "php_admin_flag[fatal_error_backtraces] = off"
+    fi
+}
+
 # True if a systemd unit file exists.
 # Note: `systemctl list-unit-files --quiet UNIT` exits 0 even when zero units
 # match, so it must not be used as an existence check.

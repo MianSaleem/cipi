@@ -446,6 +446,7 @@ php_admin_value[upload_max_filesize] = 2M
 php_admin_value[post_max_size] = 2M
 php_admin_flag[log_errors] = on
 php_admin_value[error_log] = /home/${app}/logs/webhook-error.log
+$(fpm_pool_hardening "$v")
 EOF
 }
 

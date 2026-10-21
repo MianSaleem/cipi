@@ -4,6 +4,37 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.6.3] — 2026-10-21
+
+### Security — PHP security release of 2026-10-21 (CVE-2026-109618, CVE-2026-109619)
+
+PHP 8.5.12, 8.4.27, 8.3.36 and 8.2.35 fix two unauthenticated remote code execution bugs (CVSS v4.0 9.2) in every SAPI that serves web requests: PHP-FPM, mod_php, php-cgi, FrankenPHP and LiteSpeed. One corrupts request data when PHP runs out of memory (CVE-2026-109618). In the other, request state survives after its memory is freed and the next request on the same worker uses it (CVE-2026-109619). The PHP project says only the update is a complete fix. This release brings it in and narrows the attack paths until it is in.
+
+- **The patch goes in on self-update.** The migration runs `cipi php upgrade` straight away. If the repository already has the patched packages, they are installed and every PHP-FPM service is restarted: a stale worker is exactly what CVE-2026-109619 exploits, so a restart is required, not a reload.
+- **PHP packages come from packages.sury.org first.** Same maintainer and packages as the Launchpad `ppa:ondrej/php`, but sury.org publishes first: on release day it had the fixed builds for Ubuntu 24.04 while the PPA was still building them. New installs and `cipi php install` now pick sury.org → PPA → Ubuntu archive (it was PPA → sury.org → archive). The migration moves existing servers off the PPA when sury.org has their suite. The PPA is removed only after the sury.org keyring and source are in place, so a failed download leaves the server as it was. Packages already installed from the PPA stay until a newer version replaces them.
+- **`cipi php upgrade` runs every night**, not every Sunday. The weekly schedule could leave a server six days behind a release like this one. With nothing to upgrade, a run costs one `apt-get update` and restarts nothing. A schedule changed by hand is left as it is.
+- **`cipi php upgrade` reports the patch level** of each installed version against the oldest patched release: *patched*, *VULNERABLE* (the fix exists but this server does not have it, typically because the repository has not published it yet), *distro* (a build from the Ubuntu archive, which backports fixes without changing the version number, so check `apt changelog php8.3-fpm`), or *END OF LIFE*. A vulnerable version makes the run exit 1, so the nightly cron mails a failure until the fix is in. `cipi php list` shows the same status, and `--json` adds `patch`, `security` and `security_floor`.
+- **Octane apps are checked too.** FrankenPHP runs on the PHP built into the binary that Octane downloads into the release, and apt never updates that binary. `cipi php upgrade` runs `current/frankenphp -v` as the app user and flags any build on PHP older than the fixed release. To fix one, run `php artisan octane:install --server=frankenphp` as the app user in `current/`, then `supervisorctl restart <app>-octane`.
+- **Every FPM pool Cipi writes turns off the two confirmed paths** of CVE-2026-109619: `php_admin_flag[session.upload_progress.enabled] = off`, and `php_admin_flag[fatal_error_backtraces] = off` on PHP 8.5 (the setting does not exist earlier). This covers app pools, Node webhook pools and the panel API and GUI pools. They are set as `php_admin_flag` so that they apply before the request is parsed, and `.user.ini` or `ini_set()` cannot turn them back on.
+
+PHP 8.1 and older no longer get fixes from the PHP project: `cipi php list` marks them END OF LIFE. Cipi installs 8.3 and later only, so this affects servers set up before 4.5.4. PHP 8.2 gets its last fixes on 31 December 2026, and the report says so.
+
+Not changed on purpose: the advisory also suggests `memory_limit=-1` and a lower `post_max_size` for servers that cannot update. Neither is a default, since an unlimited memory limit trades this bug for runaway workers and a 32M body limit would break uploads that work today. Both stay available through `cipi ini set`, server-wide or per app (`--app=`): `upload_max_filesize=30M` and then `post_max_size=32M`, or `memory_limit=-1` together with a memory cap on the `phpX.Y-fpm` service (systemd `MemoryMax=`). Do not use `RLIMIT_AS` or `RLIMIT_DATA` for this: the advisory warns that they can trigger the allocation failure behind the bug.
+
+### Migration
+
+`lib/migrations/5.6.3.sh`:
+
+1. Renders the app and Node webhook pools again and adds the two lines to the `cipi-api` and `cipi-gui` pools. Their generators would also empty the panel logs, so those two pools are edited in place. The previous pools are kept in `/var/lib/cipi/fpm-pool-backup-5.6.3/`, and a version whose new pools fail `php-fpm -t` gets the old ones back.
+2. Moves the `cipi php upgrade` cron from weekly to daily.
+3. Moves the PHP package source from the ondrej PPA to packages.sury.org when sury.org has the server's suite (24.04 and 26.04 do).
+4. Runs `cipi php upgrade` and prints the patch level of each version and of each Octane app.
+5. Restarts every PHP-FPM service whose configuration passes `php-fpm -t`.
+
+If the repository did not have the packages yet when the migration ran, the nightly 03:30 run installs them. To install them sooner, run `cipi php upgrade`.
+
+---
+
 ## [5.6.2] — 2026-10-20
 
 ### Fixed — a failed PostgreSQL restore no longer empties the database

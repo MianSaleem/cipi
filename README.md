@@ -151,7 +151,7 @@ cipi zt enable          # Cloudflare Zero Trust: tunnel + real_ip, ports stay op
 cipi scan enable        # nightly: release integrity + ClamAV on uploads
 ```
 
-Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every Sunday by `cipi php upgrade`. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
+Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
 
 ```bash
 cipi nginx upgrade                 # nginx.org mainline, config test, reload

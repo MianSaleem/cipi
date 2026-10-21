@@ -17,20 +17,101 @@ php_command() {
     esac
 }
 
-# Weekly cron + migration hook — idempotent root crontab entry.
+# Daily cron + migration hook — idempotent root crontab entry.
+# Daily since 5.6.3: the weekly run left a server up to six days behind a
+# PHP security release. apt only restarts FPM when a package changed, so a
+# quiet day costs one `apt-get update`.
 _php_setup_upgrade_cron() {
     [[ "${EUID:-$(id -u)}" -ne 0 ]] && return 0
-    if crontab -l 2>/dev/null | grep -qF 'cipi php upgrade'; then
+    local cur
+    cur=$(crontab -l 2>/dev/null || true)
+    if grep -qF 'cipi php upgrade' <<< "$cur"; then
+        # The weekly line Cipi wrote before 5.6.3 becomes daily. A schedule
+        # the operator changed by hand is theirs and is left alone.
+        if grep -qE '^30 3 \* \* 0 .*cipi php upgrade' <<< "$cur"; then
+            sed -e 's/^# PHP security patch check (Sunday 3:30 AM)$/# PHP security patch check (daily 3:30 AM)/' \
+                -e 's/^30 3 \* \* 0 \(.*cipi php upgrade\)/30 3 * * * \1/' <<< "$cur" | crontab -
+        fi
         return 0
     fi
-    if ! crontab -l 2>/dev/null | grep -q "CIPI CRON"; then
-        return 0
-    fi
+    grep -q "CIPI CRON" <<< "$cur" || return 0
     {
-        crontab -l 2>/dev/null
-        echo "# PHP security patch check (Sunday 3:30 AM)"
-        echo '30 3 * * 0 /usr/local/bin/cipi-cron-notify php-upgrade /usr/local/bin/cipi php upgrade >> /var/log/cipi/php-upgrade.log 2>&1'
+        printf '%s\n' "$cur"
+        echo "# PHP security patch check (daily 3:30 AM)"
+        echo '30 3 * * * /usr/local/bin/cipi-cron-notify php-upgrade /usr/local/bin/cipi php upgrade >> /var/log/cipi/php-upgrade.log 2>&1'
     } | crontab -
+}
+
+# End of security support for a branch that still gets fixes, if it is near.
+_php_branch_eol() {
+    case "$1" in
+        8.2) echo "2026-12-31" ;;
+    esac
+}
+
+# One line per installed PHP branch: the version and how it stands against
+# php_security_floor. Returns 1 when a branch is below the floor on a
+# repository that ships upstream versions — the fix exists, this server
+# does not have it yet.
+_php_security_report() {
+    local v state full floor eol bad=0
+    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+        php_is_installed "$v" || continue
+        read -r state full <<< "$(php_security_state "$v")"
+        floor=$(php_security_floor "$v")
+        eol=$(_php_branch_eol "$v")
+        case "$state" in
+            patched)
+                echo -e "  PHP ${v}  ${GREEN}${full}${NC}  patched${eol:+ ${YELLOW}— security fixes end ${eol}, move apps to 8.3+${NC}}"
+                ;;
+            vulnerable)
+                echo -e "  PHP ${v}  ${RED}${full}${NC}  ${RED}VULNERABLE${NC} — ${floor} fixes it; if the repository does not have it yet, run cipi php upgrade again later"
+                bad=1
+                ;;
+            distro)
+                echo -e "  PHP ${v}  ${YELLOW}${full}${NC}  Ubuntu archive build — fixes are backported without a version bump; check: apt changelog php${v}-fpm"
+                ;;
+            eol)
+                echo -e "  PHP ${v}  ${RED}${full}${NC}  ${RED}END OF LIFE${NC} — the PHP project no longer patches ${v}; move its apps: cipi app edit <app> --php=8.5"
+                ;;
+            *)
+                echo -e "  PHP ${v}  ${YELLOW}php${v} CLI not found${NC} — version unknown"
+                ;;
+        esac
+    done
+    return "$bad"
+}
+
+# Octane apps answer requests from the FrankenPHP binary Octane downloads
+# into the release, and that binary carries a PHP of its own: apt never
+# patches it. One line per Octane app with the PHP inside the binary. The
+# binary belongs to the app user, so it runs as that user, never as root.
+# Returns 1 when a binary embeds a PHP below php_security_floor.
+_php_frankenphp_report() {
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
+    local app bin out full floor bad=0
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        bin="/home/${app}/current/frankenphp"
+        if [[ ! -x "$bin" ]] || ! id "$app" &>/dev/null; then
+            echo -e "  ${app}  ${YELLOW}no FrankenPHP binary in current/${NC} — check the PHP it runs on with: frankenphp -v"
+            continue
+        fi
+        out=$(runuser -u "$app" -- timeout 10 "$bin" -v 2>/dev/null || true)
+        full=$(grep -oE 'PHP [0-9]+\.[0-9]+\.[0-9]+' <<< "$out" | head -1 | cut -d' ' -f2 || true)
+        if [[ -z "$full" ]]; then
+            echo -e "  ${app}  ${YELLOW}FrankenPHP did not report its PHP version${NC} — check: ${bin} -v"
+            continue
+        fi
+        floor=$(php_security_floor "${full%.*}")
+        if [[ -n "$floor" ]] && version_at_least "$full" "$floor"; then
+            echo -e "  ${app}  FrankenPHP on PHP ${GREEN}${full}${NC}  patched"
+        else
+            echo -e "  ${app}  FrankenPHP on PHP ${RED}${full}${NC}  ${RED}VULNERABLE${NC} — needs a FrankenPHP build on PHP ${floor:-8.3+}: run php artisan octane:install --server=frankenphp in /home/${app}/current as ${app}, then supervisorctl restart ${app}-octane"
+            bad=1
+        fi
+    done < <(vault_read apps.json 2>/dev/null | jq -r 'to_entries[] | select(.value.octane == "frankenphp") | .key' 2>/dev/null || true)
+    return "$bad"
 }
 
 _php_upgrade() {
@@ -72,20 +153,29 @@ _php_upgrade() {
 
     if [[ "$upgraded" -eq 0 ]]; then
         info "PHP packages are up to date"
-        return 0
+        rc=0
+    else
+        # A restart, not a reload: every worker has to go, since a stale
+        # worker can hold request state across requests (CVE-2026-109619).
+        step "Restarting PHP-FPM services..."
+        for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+            php_is_installed "$v" && reload_php_fpm "$v" 2>/dev/null || true
+        done
+
+        log_action "PHP UPGRADE: ${upgraded} package(s)"
+        cipi_notify \
+            "Cipi PHP upgraded on $(hostname)" \
+            "Installed PHP packages were upgraded.\n\nServer: $(hostname)\nPackages upgraded: ${upgraded}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+            php_upgrade
+        success "PHP packages upgraded (${upgraded})"
     fi
 
-    step "Restarting PHP-FPM services..."
-    for v in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
-        php_is_installed "$v" && reload_php_fpm "$v" 2>/dev/null || true
-    done
-
-    log_action "PHP UPGRADE: ${upgraded} package(s)"
-    cipi_notify \
-        "Cipi PHP upgraded on $(hostname)" \
-        "Installed PHP packages were upgraded.\n\nServer: $(hostname)\nPackages upgraded: ${upgraded}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
-        php_upgrade
-    success "PHP packages upgraded (${upgraded})"
+    step "Security patch level..."
+    _php_security_report || { [[ $rc -ne 0 ]] || rc=1; }
+    if vault_read apps.json 2>/dev/null | jq -e 'any(.[]; .octane == "frankenphp")' &>/dev/null; then
+        step "Octane apps (FrankenPHP ships its own PHP — apt does not patch it)..."
+        _php_frankenphp_report || { [[ $rc -ne 0 ]] || rc=1; }
+    fi
     return "$rc"
 }
 
@@ -248,6 +338,7 @@ php_admin_value[memory_limit] = 256M
 php_admin_value[max_execution_time] = 300
 php_admin_value[error_log] = /var/log/cipi-api-php-error.log
 php_admin_flag[log_errors] = on
+$(fpm_pool_hardening "$v")
 POOL
 
     : > /var/log/cipi-api-fpm-slow.log 2>/dev/null || true
@@ -289,6 +380,7 @@ request_slowlog_timeout = 30s
 catch_workers_output = yes
 php_admin_value[error_log] = /var/log/cipi-gui-php-error.log
 php_admin_value[open_basedir] = ${basedir}
+$(fpm_pool_hardening "$v")
 POOL
 
     touch /var/log/cipi-gui-fpm-slow.log /var/log/cipi-gui-php-error.log 2>/dev/null || true
@@ -558,8 +650,13 @@ _php_list() {
                 [[ "$n" =~ ^[0-9]+$ ]] || n=0
                 local is_default=false
                 [[ "$v" == "$sys_ver" ]] && is_default=true
+                local sec full
+                read -r sec full <<< "$(php_security_state "$v")"
                 items=$(echo "$items" | jq -c --arg v "$v" --arg s "$st" --argjson n "$n" --argjson d "$is_default" \
-                    '. + [{version:$v, status:$s, apps:$n, default:$d}]')
+                    --arg full "$full" --arg sec "$sec" --arg floor "$(php_security_floor "$v")" \
+                    '. + [{version:$v, status:$s, apps:$n, default:$d,
+                           patch:(if $full == "-" then null else $full end), security:$sec,
+                           security_floor:(if $floor == "" then null else $floor end)}]')
             fi
         done
         jq -n --argjson versions "$items" --arg default "$sys_ver" \
@@ -575,7 +672,16 @@ _php_list() {
             systemctl is-active --quiet "php${v}-fpm" 2>/dev/null && st="running" && c="${GREEN}"
             local n=0; [[ -f "${CIPI_CONFIG}/apps.json" ]] && n=$(vault_read apps.json | jq --arg v "$v" '[to_entries[]|select(.value.php==$v)]|length' 2>/dev/null||echo 0)
             local def=""; [[ "$v" == "$sys_ver" ]] && def=" ${CYAN}← system default${NC}"
-            printf "  PHP %-6s ${c}● %-8s${NC}  %d apps%b\n" "$v" "$st" "$n" "$def"
+            local sec full sc
+            read -r sec full <<< "$(php_security_state "$v")"
+            case "$sec" in
+                patched) sc="${GREEN}" ;;
+                vulnerable|eol) sc="${RED}" ;;
+                *) sc="${YELLOW}" ;;
+            esac
+            printf "  PHP %-6s ${c}● %-8s${NC}  %-8s ${sc}%-10s${NC}  %d apps%b\n" "$v" "$st" "$full" "$sec" "$n" "$def"
         fi
     done; echo ""
+    echo -e "  ${DIM}Security detail and fix: cipi php upgrade${NC}"
+    echo ""
 }

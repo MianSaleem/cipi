@@ -785,6 +785,7 @@ php_admin_value[memory_limit] = 256M
 php_admin_value[max_execution_time] = 300
 php_admin_value[error_log] = /var/log/cipi-api-php-error.log
 php_admin_flag[log_errors] = on
+$(fpm_pool_hardening "$v")
 POOL
     for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
         [[ "$pv" == "$v" ]] && continue

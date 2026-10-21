@@ -2268,6 +2268,7 @@ request_terminate_timeout = 300
 php_admin_value[open_basedir] = /home/${app}/:/tmp/:/proc/
 php_admin_value[error_log] = /home/${app}/logs/php-fpm-error.log
 php_admin_flag[log_errors] = on
+$(fpm_pool_hardening "$v")
 EOF
     # Appended after the heredoc, not inside it: a heredoc only ends on a line
     # holding the delimiter *alone*, so the old `${overrides}EOF` never closed

@@ -117,53 +117,65 @@ php_remove_sury_repo() {
     rm -f /etc/apt/sources.list.d/php-sury.list /etc/apt/sources.list.d/php.list 2>/dev/null || true
 }
 
+# Returns 1, leaving no source behind, when the keyring cannot be installed.
 php_setup_sury_repo() {
-    local codename
+    local codename tmpdeb
     codename="$(ubuntu_codename)"
 
     apt-get $_cipi_apt_lock_timeout_opts install -y -qq ca-certificates curl
 
-    curl -fsSL -o /tmp/debsuryorg-archive-keyring.deb \
-        https://packages.sury.org/debsuryorg-archive-keyring.deb
+    tmpdeb=$(mktemp /tmp/debsuryorg-archive-keyring.XXXXXX) || return 1
+    if ! curl -fsSL -o "$tmpdeb" https://packages.sury.org/debsuryorg-archive-keyring.deb; then
+        rm -f "$tmpdeb"
+        return 1
+    fi
     cipi_wait_for_dpkg_lock
-    dpkg -i /tmp/debsuryorg-archive-keyring.deb
-    rm -f /tmp/debsuryorg-archive-keyring.deb
+    dpkg -i "$tmpdeb" >/dev/null || { rm -f "$tmpdeb"; return 1; }
+    rm -f "$tmpdeb"
+    [[ -s /usr/share/keyrings/debsuryorg-archive-keyring.gpg ]] || return 1
 
     echo "deb [signed-by=/usr/share/keyrings/debsuryorg-archive-keyring.gpg] https://packages.sury.org/php/ ${codename} main" \
         > /etc/apt/sources.list.d/php-sury.list
 }
 
 # Configure PHP APT sources for co-installable versions (8.3 / 8.4 / 8.5).
-# Priority: Launchpad ondrej PPA → packages.sury.org → Ubuntu archive only.
+# Priority: packages.sury.org → Launchpad ondrej PPA → Ubuntu archive only.
+# Same maintainer and packages either way, but sury.org publishes first: on
+# the 2026-10-21 security release it had the fixed builds for noble while
+# the PPA was still building them. The PPA is removed only once sury.org is
+# in place, so a failed keyring download leaves the PPA working.
 # Returns 0 when a multi-version repo was configured, 1 when Ubuntu archive only.
 php_setup_apt_sources() {
     local codename
     codename="$(ubuntu_codename)"
 
+    if php_sury_repo_available "$codename" && php_setup_sury_repo; then
+        php_remove_ondrej_ppa_sources
+        return 0
+    fi
+
+    php_remove_sury_repo
+
     if php_ondrej_ppa_available "$codename"; then
-        php_remove_sury_repo
         add-apt-repository -y ppa:ondrej/php &>/dev/null
         return 0
     fi
 
     php_remove_ondrej_ppa_sources
-
-    if php_sury_repo_available "$codename"; then
-        php_setup_sury_repo
-        return 0
-    fi
-
-    php_remove_sury_repo
     return 1
 }
 
+# True when the PHP packages come from packages.sury.org.
+php_sury_repo_configured() {
+    [[ -f /etc/apt/sources.list.d/php-sury.list || -f /etc/apt/sources.list.d/php.list ]]
+}
+
+# The source this server is configured with, not the one it would pick.
 php_apt_source_label() {
-    local codename
-    codename="$(ubuntu_codename)"
-    if php_ondrej_ppa_available "$codename"; then
-        echo "ondrej/php PPA"
-    elif php_sury_repo_available "$codename"; then
+    if php_sury_repo_configured; then
         echo "packages.sury.org"
+    elif compgen -G "/etc/apt/sources.list.d/ondrej-ubuntu-php*" >/dev/null; then
+        echo "ondrej/php PPA"
     else
         echo "Ubuntu archive"
     fi

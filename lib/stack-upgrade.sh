@@ -4,7 +4,7 @@
 #
 # Nginx, MariaDB, PostgreSQL and Valkey are blacklisted from
 # unattended-upgrades: a database restart is not something to do at 4am
-# unattended. PHP has its own weekly cron (`cipi php upgrade`). These
+# unattended. PHP has its own daily cron (`cipi php upgrade`). These
 # helpers are the operator-facing equivalent — patch-level only
 # (`apt --only-upgrade` of packages already installed), Cipi configs
 # kept (`--force-confold`), confirmation unless `--yes`.
@@ -220,7 +220,7 @@ _stack_upgrade_status() {
     echo -e "  ${CYAN}cipi db upgrade [mariadb|pgsql]${NC}"
     echo -e "  ${CYAN}cipi service upgrade valkey${NC}"
     echo ""
-    echo -e "  ${DIM}PHP patches: ${CYAN}cipi php upgrade${NC}${DIM} (Sunday 03:30). Cipi: ${CYAN}cipi self-update${NC}${DIM}.${NC}"
+    echo -e "  ${DIM}PHP patches: ${CYAN}cipi php upgrade${NC}${DIM} (daily 03:30). Cipi: ${CYAN}cipi self-update${NC}${DIM}.${NC}"
     echo ""
 }
 

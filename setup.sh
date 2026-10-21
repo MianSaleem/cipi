@@ -1129,7 +1129,7 @@ setup_cron() {
 
     # Configure unattended-upgrades: security patches only.
     # nginx / mariadb / postgresql / valkey / php stay off the automatic path
-    # (a database restart is not a 4am surprise). PHP has a weekly cron
+    # (a database restart is not a 4am surprise). PHP has a daily cron
     # (`cipi php upgrade`); the others wait for `cipi nginx upgrade`,
     # `cipi db upgrade`, `cipi service upgrade valkey`.
     cat > /etc/apt/apt.conf.d/50cipi-unattended-upgrades <<'UUEOF'
@@ -1176,8 +1176,8 @@ AUEOF
 # === CIPI CRON JOBS ===
 # Cipi self-update (daily 3:50 AM)
 50 3 * * * /usr/local/bin/cipi-cron-notify self-update /usr/local/bin/cipi self-update >> /var/log/cipi/cipi.log 2>&1
-# PHP security patch check (Sunday 3:30 AM)
-30 3 * * 0 /usr/local/bin/cipi-cron-notify php-upgrade /usr/local/bin/cipi php upgrade >> /var/log/cipi/php-upgrade.log 2>&1
+# PHP security patch check (daily 3:30 AM)
+30 3 * * * /usr/local/bin/cipi-cron-notify php-upgrade /usr/local/bin/cipi php upgrade >> /var/log/cipi/php-upgrade.log 2>&1
 # SSL renewal (Sunday 4 AM) — no --nginx: each certificate renews the way it
 # was issued (HTTP-01 via nginx, DNS-01 via Cloudflare for wildcards)
 10 4 * * 0 /usr/local/bin/cipi-cron-notify ssl-renew certbot renew --non-interactive --post-hook "systemctl reload nginx" >> /var/log/cipi/certbot.log 2>&1
