@@ -791,7 +791,7 @@ purge_orphan_app_users() {
         rm -f "/etc/nginx/sites-enabled/${u}" "/etc/nginx/sites-available/${u}"
         rm -f /etc/php/*/fpm/pool.d/"${u}.conf"
         rm -f "/etc/supervisor/conf.d/${u}.conf"
-        rm -f "/etc/sudoers.d/cipi-${u}"
+        rm -f "/etc/sudoers.d/cipi-${u}" "/etc/sudoers.d/cipi-${u}-yml"
         rm -f "/etc/nginx/cipi-basicauth/${u}.htpasswd"
         supervisorctl stop "${u}-worker-"* 2>/dev/null || true
         remove_app_linux_user "$u"

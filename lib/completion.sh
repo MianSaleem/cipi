@@ -318,8 +318,10 @@ _cipi_complete() {
                 2) sub="$(_cipi_apps)" ;;
                 3) case "$w1" in
                        auto) sub="on off status" ;;
+                       plan|diff) sub="--json" ;;
                        generate|dump) sub="--save --force" ;;
                    esac ;;
+                4) [[ "$w1" == auto ]] && sub="--json" ;;
             esac ;;
 
         nginx)

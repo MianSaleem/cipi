@@ -4,6 +4,36 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.6.4] — 2026-10-22
+
+### Fixed — `cipi yml auto <app> on` did nothing on Git-webhook deploys
+
+A push deployed the code and never applied cipi.yml, even with auto-apply on. The webhook path runs as the app user (`cipi-app-deploy`, from the app's crontab), and it decided whether to apply by checking `test -f /etc/sudoers.d/cipi-<app>-yml`. On Debian and Ubuntu `/etc/sudoers.d` is `0750 root:root`, so the app user cannot see into it: the test was always false and the step was skipped without a word in the deploy log. `cipi deploy` (from a shell or the panel) runs as root and was not affected.
+
+- **The wrapper asks sudo instead** (`sudo -n -l` for the exact command line the rule allows, the way the Node recipe already checks for `cipi yml node-sync`), and runs the apply with `sudo -n`, so a missing rule can never wait for a password.
+- **`cipi app delete` removes `/etc/sudoers.d/cipi-<app>-yml` too.** It was left behind, and a new app created later with the same name inherited the rule.
+- **`cipi sync import` and `cipi sync update` write the rule** when the imported app has auto-apply on. `apps.json` carried `yml_auto` across, `/etc/sudoers.d` did not, so the imported app applied cipi.yml on `cipi deploy` and skipped it on a push.
+- **`cipi yml auto <app> status` says when the rule is missing** while auto-apply is on. `cipi yml auto <app> on` writes it again.
+
+### Added — cipi.yml for the panel API and its clients
+
+- **`cipi yml plan <app> --json`** prints the whole picture as one object: `file` (null when the release has none), `auto`, `valid` with `errors` and `warnings`, `changes` (`kind`, `summary`), `blockers`, `notes`, `in_sync`. A missing, invalid or blocked file is still a plan and exits 0; only an unknown app is an error.
+- **`cipi yml auto <app> status --json`** prints `{app, auto, sudoers, file}`. `cipi yml auto <app> --json` is the same.
+- **The panel API may run `cipi yml plan *`, `cipi yml apply *` and `cipi yml auto *`** ([cipi/api](https://github.com/cipi-sh/api) 1.35.0: `GET /api/apps/{name}/yml`, `POST …/yml/apply`, `POST …/yml/auto/enable|disable`, abilities `yml-view` and `yml-manage`). The GUI, `cipi-cli yml`, the PHP SDK and Cipi Studio use them. The sudoers wildcard cannot keep `--file=` out, and a parser pointed at another file would quote its lines back in the errors, so **`--file` is refused when the caller is www-data**.
+
+### Migration
+
+`lib/migrations/5.6.4.sh`:
+
+1. Installs the fixed `/usr/local/bin/cipi-app-deploy`.
+2. Rewrites `/etc/sudoers.d/cipi-api` with the three `yml` entries.
+3. Brings every app's `/etc/sudoers.d/cipi-<app>-yml` in line with `yml_auto` in `apps.json`: written where auto-apply is on, removed where it is off.
+4. Removes the rules of apps that no longer exist.
+
+Steps 3 and 4 run only when `apps.json` could be read, so an unreadable vault never looks like a server without apps.
+
+---
+
 ## [5.6.3] — 2026-10-21
 
 ### Security — PHP security release of 2026-10-21 (CVE-2026-109618, CVE-2026-109619)

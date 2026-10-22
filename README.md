@@ -214,7 +214,10 @@ its backup strategy, and **post-deploy steps** (`deploy.post`).
 
 Server reconciliation (aliases, PHP, workers, databases, …) is **opt-in**:
 `cipi yml auto <app> on` makes every successful deploy run `cipi yml apply`
-(from `cipi deploy` or the Git webhook). A release without the file is a no-op.
+(from `cipi deploy`, the panel or the Git webhook). A release without the file is a no-op.
+`cipi yml auto <app> status` says whether it is on and which file is in use.
+
+**The same over the API.** With [cipi/api](https://github.com/cipi-sh/api) 1.35+ on the server (Cipi 5.6.4+ for the sudoers entry), `GET /api/apps/{name}/yml` returns `cipi yml plan <app> --json` (the file, auto-apply on or off, what would change, what blocks it), `POST /api/apps/{name}/yml/apply` runs `cipi yml apply` as a job, and `POST /api/apps/{name}/yml/auto/enable|disable` turn auto-apply on and off — token abilities `yml-view` and `yml-manage`. `cipi-cli yml`, the GUI's app → cipi.yml tab, the PHP SDK, Cipi Studio and the MCP tools `AppYmlShow` / `AppYmlApply` / `AppYmlAuto` use them.
 
 **`deploy.post` is different** — it runs after every successful deploy as soon
 as the section is in the committed file, with no auto switch, and only once

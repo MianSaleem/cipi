@@ -506,6 +506,17 @@ _sync_import() {
         sync_import
 }
 
+# apps.json arrives with the source's yml_auto, but /etc/sudoers.d does not
+# travel: without its rule a webhook deploy here would skip cipi.yml while
+# `cipi deploy` applied it. Bring the rule in line with the imported flag.
+_sync_yml_auto_sudoers() {
+    local app="$1"
+    # shellcheck source=/dev/null
+    declare -f yml_auto_sudoers_sync >/dev/null 2>&1 || source "${CIPI_LIB}/yml.sh"
+    yml_auto_sudoers_sync "$app" \
+        || warn "cipi.yml auto-apply: sudoers rule rejected for '${app}' — run: cipi yml auto ${app} on"
+}
+
 # ── CREATE APP (fresh import) ─────────────────────────────────
 
 _sync_create_app() {
@@ -732,6 +743,7 @@ ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-scan-manifest ${app}
 ${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi-deploy-audit ${app} *
 SUDO
     chmod 440 "/etc/sudoers.d/cipi-${app}"
+    _sync_yml_auto_sudoers "$app"
 
     # 17. Deploy
     if [[ "$run_deploy" == "true" ]]; then
@@ -849,6 +861,7 @@ _sync_update_app() {
     # 6. Update apps.json (aliases, branch, repository, etc.)
     local app_json; app_json=$(jq --arg a "$app" '.[$a]' "${dir}/config/apps.json")
     app_save "$app" "$app_json"
+    _sync_yml_auto_sudoers "$app"
 
     # 7. Regenerate nginx vhost (picks up alias changes / Octane proxy)
     step "Nginx..."

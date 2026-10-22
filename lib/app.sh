@@ -1293,7 +1293,7 @@ app_delete() {
         search_cleanup_app "$app" || true
     fi
     step "Crontab...";     crontab -u "$app" -r 2>/dev/null||true
-    step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}"
+    step "Sudoers...";     rm -f "/etc/sudoers.d/cipi-${app}" "/etc/sudoers.d/cipi-${app}-yml"
     step "Basic auth...";  rm -f "/etc/nginx/cipi-basicauth/${app}.htpasswd"
     step "SSL...";         certbot delete --cert-name "$(domain_cert_name "$d")" --non-interactive 2>/dev/null||true
     step "User & files..."

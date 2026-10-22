@@ -132,15 +132,20 @@ fi
 # Reconcile the server with the cipi.yml shipped in this release, but only when
 # root has explicitly opted this app in (`cipi yml auto <app> on`), which is
 # also what creates the single narrowly scoped sudoers rule below. Without that
-# file the app user cannot run this at all.
+# rule the app user cannot run this at all.
+#
+# Ask sudo whether the rule is there instead of looking for the drop-in file:
+# /etc/sudoers.d is 0750 root:root on Debian and Ubuntu, so to the app user
+# `test -f /etc/sudoers.d/cipi-<app>-yml` is always false, and before 5.6.4 a
+# webhook deploy never applied cipi.yml even with auto-apply on.
 YML_LINE=""
-if [[ -f "/etc/sudoers.d/cipi-${APP}-yml" ]]; then
+if sudo -n -l /usr/local/bin/cipi yml apply "$APP" --yes --auto >/dev/null 2>&1; then
     {
         printf '[%(%Y-%m-%d %H:%M:%S)T] ===== cipi.yml apply =====\n' -1
     } >> "$LOG" 2>/dev/null || true
     YML_MARK=$(wc -l < "$LOG" 2>/dev/null || echo 0)
     YML_RC=0
-    sudo /usr/local/bin/cipi yml apply "$APP" --yes --auto >> "$LOG" 2>&1 || YML_RC=$?
+    sudo -n /usr/local/bin/cipi yml apply "$APP" --yes --auto >> "$LOG" 2>&1 || YML_RC=$?
     if [[ $YML_RC -ne 0 ]]; then
         printf '[%(%Y-%m-%d %H:%M:%S)T] cipi.yml apply failed — see above\n' -1 >> "$LOG" 2>/dev/null || true
     fi

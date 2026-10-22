@@ -1644,9 +1644,20 @@ if __name__ == "__main__":
 CIPIYAMLPY
 }
 
+# The panel API (www-data) may run `cipi yml plan|apply *` through sudo, and
+# that wildcard cannot keep --file= out. Pointed at any other file, the parser
+# would quote its lines back in the errors, so --file is not for www-data: the
+# API only ever reads the app's own cipi.yml.
+_yml_file_arg_allowed() {
+    [[ -n "${ARG_file:-}" && "${SUDO_USER:-}" == "www-data" ]] || return 0
+    error "--file is not available through the panel API"
+    exit 1
+}
+
 _yml_resolve() {
     # Sets _YML_FILE and _YML_APP from args. parse_args must already have run.
     local app="${1:-}"
+    _yml_file_arg_allowed
     _YML_FILE="${ARG_file:-}"
     if [[ -n "$_YML_FILE" ]]; then
         [[ -f "$_YML_FILE" ]] || { error "File not found: ${_YML_FILE}"; exit 1; }
@@ -2562,6 +2573,10 @@ _yml_source_libs() {
 _yml_plan_cmd() {
     local app="${1:-}"; shift||true
     parse_args "$@"
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        _yml_plan_json "$app"
+        return
+    fi
     _yml_resolve "$app"
     _yml_source_libs
     _yml_load || exit 1
@@ -2569,6 +2584,61 @@ _yml_plan_cmd() {
     _yml_print_plan
     [[ ${#_YML_BLOCKERS[@]} -gt 0 ]] && return 1
     return 0
+}
+
+# Lines on stdin → a JSON array of strings (an empty input is []).
+_yml_json_lines() {
+    jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+
+# cipi yml plan <app> --json — the whole picture in one object, for the panel
+# API: whether a file is there, whether auto-apply is on, and what applying
+# would change. A missing, invalid or blocked file is still a plan (exit 0);
+# only an unknown app is an error.
+#   {"app","file","auto","valid","in_sync","errors","warnings","changes":[{kind,summary}],"blockers","notes"}
+# valid and in_sync are null when there is no file.
+_yml_plan_json() {
+    local app="$1" auto=false result errors="[]" warnings="[]" valid=null in_sync=null
+    local changes="[]" blockers="[]" notes="[]"
+    [[ -n "$app" ]] || { error "Usage: cipi yml plan <app> --json"; exit 1; }
+    app_exists "$app" || { error "App '${app}' not found"; exit 1; }
+    _yml_file_arg_allowed
+    [[ "$(app_get "$app" yml_auto)" == "true" ]] && auto=true
+    _YML_APP="$app"
+    _YML_FILE="${ARG_file:-}"
+    [[ -n "$_YML_FILE" ]] || _YML_FILE=$(_yml_find_file "$app") || _YML_FILE=""
+
+    if [[ -n "$_YML_FILE" ]]; then
+        result=$(_yml_parse "$_YML_FILE" "$app") || true
+        jq -e . <<< "$result" >/dev/null 2>&1 \
+            || result='{"ok":false,"errors":["cipi.yml could not be read"],"warnings":[]}'
+        warnings=$(jq -c '.warnings // []' <<< "$result")
+        if [[ "$(jq -r '.ok' <<< "$result")" == "true" ]]; then
+            valid=true
+            _YML_DATA=$(jq '.data' <<< "$result")
+            # The plan's helpers talk on stdout; only the JSON below may.
+            _yml_source_libs >&2
+            _yml_build_plan >&2
+            local a
+            changes=$(for a in "${_YML_ACTIONS[@]}"; do printf '%s\t%s\n' "${a%%|*}" "${a##*|}"; done \
+                | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | {kind: .[0], summary: .[1]})')
+            blockers=$(printf '%s\n' "${_YML_BLOCKERS[@]}" | _yml_json_lines)
+            notes=$(printf '%s\n' "${_YML_NOTES[@]}" | _yml_json_lines)
+            in_sync=false
+            [[ ${#_YML_ACTIONS[@]} -eq 0 && ${#_YML_BLOCKERS[@]} -eq 0 ]] && in_sync=true
+        else
+            valid=false
+            errors=$(jq -c '.errors // []' <<< "$result")
+        fi
+    fi
+
+    jq -nc --arg app "$app" --arg file "$_YML_FILE" --argjson auto "$auto" \
+        --argjson valid "$valid" --argjson in_sync "$in_sync" \
+        --argjson errors "$errors" --argjson warnings "$warnings" \
+        --argjson changes "$changes" --argjson blockers "$blockers" --argjson notes "$notes" \
+        '{app: $app, file: (if $file == "" then null else $file end), auto: $auto,
+          valid: $valid, in_sync: $in_sync, errors: $errors, warnings: $warnings,
+          changes: $changes, blockers: $blockers, notes: $notes}'
 }
 
 # Is this URL served by the app itself?
@@ -3261,28 +3331,50 @@ _yml_post_deploy_cmd() {
 
 # ── Automatic apply after deploy ─────────────────────────────
 
+# The deploy trigger runs as the app user, so applying after a deploy needs
+# exactly one narrowly scoped sudo rule — that command line and no other.
+# Written (or removed) from apps.json's yml_auto, so the flag and the rule never
+# disagree: `cipi yml auto`, `cipi sync import|update` and migration 5.6.4 all
+# go through here. Returns 1 when the rule was rejected and is not in place.
+yml_auto_sudoers_sync() {
+    local app="$1" sudoers="/etc/sudoers.d/cipi-${1}-yml" tmp
+    if [[ "$(app_get "$app" yml_auto)" != "true" ]]; then
+        rm -f "$sudoers"
+        return 0
+    fi
+    # Checked before it goes live, then moved into place: sudo skips names with
+    # a dot, so it never reads a half-written or rejected rule.
+    tmp="${sudoers}.tmp.$$"
+    cat > "$tmp" <<SUDO
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml apply ${app} --yes --auto
+${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml node-sync ${app} *
+SUDO
+    chmod 440 "$tmp"
+    if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$tmp" &>/dev/null; then
+        rm -f "$tmp" "$sudoers"
+        return 1
+    fi
+    mv -f "$tmp" "$sudoers"
+}
+
 _yml_auto_cmd() {
     local app="${1:-}" mode="${2:-status}"
-    [[ -z "$app" ]] && { error "Usage: cipi yml auto <app> on|off|status"; exit 1; }
+    shift 2 2>/dev/null || true
+    # `cipi yml auto <app> --json` is the status, like `cipi yml auto <app>`.
+    [[ "$mode" == --* ]] && { set -- "$mode" "$@"; mode="status"; }
+    parse_args "$@"
+    [[ -z "$app" ]] && { error "Usage: cipi yml auto <app> on|off|status [--json]"; exit 1; }
     app_exists "$app" || { error "App '${app}' not found"; exit 1; }
     local sudoers="/etc/sudoers.d/cipi-${app}-yml"
 
     case "$mode" in
         on|enable)
-            # The deploy trigger runs as the app user, so applying after a
-            # deploy needs exactly one narrowly scoped sudo rule — that command
-            # line and no other.
-            cat > "$sudoers" <<SUDO
-${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml apply ${app} --yes --auto
-${app} ALL=(root) NOPASSWD: /usr/local/bin/cipi yml node-sync ${app} *
-SUDO
-            chmod 440 "$sudoers"
-            if ! visudo -cf "$sudoers" &>/dev/null; then
-                rm -f "$sudoers"
+            app_set "$app" yml_auto "true"
+            if ! yml_auto_sudoers_sync "$app"; then
+                app_unset "$app" yml_auto
                 error "sudoers rule rejected — automatic apply not enabled"
                 exit 1
             fi
-            app_set "$app" yml_auto "true"
             success "cipi.yml will be applied after every successful deploy of '${app}'"
             info "Both paths: 'cipi deploy ${app}' and the Git webhook."
             warn "Anyone who can commit to the repository can now change this app's"
@@ -3293,14 +3385,22 @@ SUDO
             log_action "YML AUTO ON: $app"
             ;;
         off|disable)
-            rm -f "$sudoers"
             app_unset "$app" yml_auto
+            yml_auto_sudoers_sync "$app"
             success "Automatic cipi.yml apply disabled for '${app}'"
             log_action "YML AUTO OFF: $app"
             ;;
         status)
-            echo -e "\n${BOLD}cipi.yml for '${app}'${NC}"
             local f
+            if [[ "${ARG_json:-}" == "true" ]]; then
+                f=$(_yml_find_file "$app") || f=""
+                jq -nc --arg app "$app" --arg file "$f" \
+                    --argjson auto "$([[ "$(app_get "$app" yml_auto)" == "true" ]] && echo true || echo false)" \
+                    --argjson rule "$([[ -f "$sudoers" ]] && echo true || echo false)" \
+                    '{app: $app, auto: $auto, sudoers: $rule, file: (if $file == "" then null else $file end)}'
+                return 0
+            fi
+            echo -e "\n${BOLD}cipi.yml for '${app}'${NC}"
             if f=$(_yml_find_file "$app"); then
                 printf "  %-16s %s\n" "File" "$f"
             else
@@ -3308,6 +3408,8 @@ SUDO
             fi
             if [[ "$(app_get "$app" yml_auto)" == "true" ]]; then
                 printf "  %-16s ${GREEN}%s${NC}\n" "Auto-apply" "on — after every successful deploy (CLI and webhook)"
+                [[ -f "$sudoers" ]] \
+                    || printf "  %-16s ${YELLOW}%s${NC}\n" "" "sudoers rule missing — webhook deploys skip it; run: cipi yml auto ${app} on"
             else
                 printf "  %-16s ${DIM}%s${NC}\n" "Auto-apply" "off — deploys ignore the file"
                 printf "  %-16s ${DIM}%s${NC}\n" "" "apply by hand: cipi yml apply ${app}"
