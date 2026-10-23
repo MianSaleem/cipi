@@ -488,6 +488,86 @@ domain_is_used_by_other_app() {
     [[ -n "$DOMAIN_USED_BY_APP" ]]
 }
 
+# Domain of the panel API (api) or GUI (gui). Returns 1 when not configured.
+panel_domain() {
+    local d
+    [[ -f "${CIPI_CONFIG}/$1.json" ]] || return 1
+    d=$(vault_read "$1.json" 2>/dev/null | jq -r '.domain // empty' 2>/dev/null) || return 1
+    [[ -n "$d" && "$d" != "null" ]] || return 1
+    printf '%s' "$d"
+}
+
+# The API and the GUI each need a hostname of their own: their Nginx vhost and
+# certificate are separate from every app's, and two vhosts with the same
+# server_name means nginx serves only one of them. Returns 0 when the domain
+# belongs to a panel (skipping $2 = api|gui, the panel being moved) and sets
+# DOMAIN_USED_BY_PANEL for the error message.
+domain_is_used_by_panel() {
+    local dom skip="${2:-}" p d
+    dom=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    DOMAIN_USED_BY_PANEL=""
+    for p in api gui; do
+        [[ "$p" == "$skip" ]] && continue
+        d=$(panel_domain "$p") || continue
+        [[ "$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')" == "$dom" ]] || continue
+        [[ "$p" == api ]] && DOMAIN_USED_BY_PANEL="the panel API (cipi api)" \
+            || DOMAIN_USED_BY_PANEL="the GUI panel (cipi gui)"
+        return 0
+    done
+    return 1
+}
+
+# Refuse a panel domain ($2 = api|gui) that an app or the other panel already serves.
+panel_domain_check() {
+    local dom="$1" self="$2"
+    if domain_is_used_by_other_app "$dom"; then
+        error "Domain '${dom}' is used by app '${DOMAIN_USED_BY_APP}'"
+        echo -e "  ${DIM}The panel needs a domain or subdomain of its own, e.g. ${self}.$(printf '%s' "$dom" | sed 's/^www\.//')${NC}"
+        return 1
+    fi
+    if domain_is_used_by_panel "$dom" "$self"; then
+        error "Domain '${dom}' is used by ${DOMAIN_USED_BY_PANEL}"
+        echo -e "  ${DIM}The API and the GUI need a domain or subdomain each.${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# Let's Encrypt lineages issued for a panel domain: <domain>, plus the
+# <domain>-NNNN copies certbot makes when that name is already taken.
+panel_cert_names() {
+    local f
+    for f in "/etc/letsencrypt/renewal/${1}.conf" "/etc/letsencrypt/renewal/${1}"-[0-9][0-9][0-9][0-9].conf; do
+        [[ -f "$f" ]] && basename "$f" .conf
+    done
+    return 0
+}
+
+# Delete the certificate of a panel domain ($1) that the panel ($2 = api|gui)
+# no longer serves. Kept when an app or the other panel still uses the domain:
+# before 5.7.0 nothing stopped a panel from sharing one.
+panel_cert_delete() {
+    local dom="$1" self="$2" n
+    [[ -n "$dom" ]] || return 0
+    if domain_is_used_by_other_app "$dom"; then
+        warn "Certificate for ${dom} kept: app '${DOMAIN_USED_BY_APP}' uses the domain"
+        return 0
+    fi
+    if domain_is_used_by_panel "$dom" "$self"; then
+        warn "Certificate for ${dom} kept: ${DOMAIN_USED_BY_PANEL} uses the domain"
+        return 0
+    fi
+    while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        if certbot delete --cert-name "$n" --non-interactive >/dev/null 2>&1; then
+            success "Certificate ${n} deleted"
+        else
+            warn "Could not delete certificate ${n} — run: certbot delete --cert-name ${n}"
+        fi
+    done < <(panel_cert_names "$dom")
+    return 0
+}
+
 app_get() { vault_read apps.json | jq -r --arg a "$1" --arg k "$2" '.[$a][$k] // empty'; }
 
 # Generate apps-public.json: a plaintext projection of apps.json containing

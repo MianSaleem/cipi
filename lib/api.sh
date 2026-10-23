@@ -337,14 +337,21 @@ api_setup() {
     [[ -z "$domain" ]] && { error "Usage: cipi api <domain>"; exit 1; }
     validate_domain "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
 
+    # Re-running setup on another domain used to rewrite the vhost without its
+    # certificate and leave the old one renewing: changing domain is `move`.
+    local cur
+    if cur=$(panel_domain api) && [[ "$cur" != "$domain" ]]; then
+        error "The API is already configured at ${cur}"
+        echo -e "  ${DIM}Change domain: cipi api move ${domain}${NC}"
+        echo -e "  ${DIM}Start over:    cipi api remove, then cipi api ${domain}${NC}"
+        exit 1
+    fi
+    panel_domain_check "$domain" api || exit 1
+
     echo ""; info "Configuring Cipi API at ${domain}..."; echo ""
 
     # Save config
     mkdir -p "${CIPI_CONFIG}"
-    if [[ -f "${CIPI_API_CONFIG}" ]]; then
-        local cur; cur=$(vault_read api.json | jq -r '.domain' 2>/dev/null)
-        [[ -n "$cur" && "$cur" != "$domain" ]] && step "Updating domain: ${cur} → ${domain}"
-    fi
     echo "{\"domain\": \"${domain}\"}" | vault_write api.json
     success "Config saved"
 
@@ -1033,6 +1040,10 @@ api_status() {
     echo -e "${BOLD}Cipi API Status${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "  Domain:     ${CYAN}https://${domain}${NC}"
+    if [[ -n "$domain" && "$domain" != "null" ]] && domain_is_used_by_other_app "$domain"; then
+        echo -e "  ${YELLOW}Shares its domain with app '${DOMAIN_USED_BY_APP}' — nginx serves only one of them.${NC}"
+        echo -e "  ${DIM}Give the API a subdomain of its own: cipi api move <domain>${NC}"
+    fi
 
     # Queue first (no DB) so output is useful even if artisan is slow or stuck
     local queue_status
@@ -1126,6 +1137,179 @@ api_ssl() {
     else
         echo ""; error "SSL failed. Check DNS, port 80, and domain."; exit 1
     fi
+}
+
+# ── API MOVE (cipi api move <domain>) ─────────────────────────
+
+_api_set_app_url() {
+    local envf="${CIPI_API_ROOT}/.env"
+    [[ -f "$envf" ]] || return 0
+    sed -i "s|^APP_URL=.*|APP_URL=https://${1}|" "$envf"
+    chown www-data:www-data "$envf" 2>/dev/null || true
+    chmod 640 "$envf" 2>/dev/null || true
+}
+
+# Same app, tokens, database and IP whitelist on a new domain. The old
+# certificate is deleted and one is issued for the new domain (--no-ssl skips
+# it), since a vhost rewritten from scratch no longer carries certbot's lines.
+api_move() {
+    local new="${1:-}"
+    shift || true
+    unset ARG_no_ssl
+    parse_args "$@"
+    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi api move <new-domain> [--no-ssl]"; exit 1; }
+    validate_domain "$new" || { error "Invalid domain '${new}'"; exit 1; }
+    [[ -f "${CIPI_API_CONFIG}" && -f "${CIPI_API_ROOT}/artisan" ]] \
+        || { error "API not configured. Run: cipi api <domain>"; exit 1; }
+
+    local old cfg
+    old=$(panel_domain api) || old=""
+    [[ "$new" == "$old" ]] && { info "The API is already at ${new}"; return 0; }
+    panel_domain_check "$new" api || exit 1
+    cfg=$(vault_read api.json | jq -c --arg d "$new" '.domain = $d') && [[ -n "$cfg" ]] \
+        || { error "Cannot read ${CIPI_API_CONFIG}"; exit 1; }
+
+    echo ""; info "Moving Cipi API: ${old:-?} → ${new}"; echo ""
+
+    # Nginx first: a config that fails `nginx -t` puts the old vhost back and
+    # leaves the API where it was.
+    step "Nginx vhost..."
+    local vhost=/etc/nginx/sites-available/cipi-api saved
+    saved=$(mktemp) || { error "mktemp failed"; exit 1; }
+    [[ -f "$vhost" ]] && cp -p "$vhost" "$saved"
+    _api_create_nginx_vhost "$new"
+    ln -sf "$vhost" /etc/nginx/sites-enabled/cipi-api
+    if ! reload_nginx; then
+        [[ -s "$saved" ]] && cp -p "$saved" "$vhost"
+        rm -f "$saved"
+        reload_nginx || true
+        error "Nginx rejected the new vhost — the API is still at ${old}"
+        exit 1
+    fi
+    rm -f "$saved"
+    success "Nginx → ${new}"
+
+    echo "$cfg" | vault_write api.json
+    _api_set_app_url "$new"
+    (cd "${CIPI_API_ROOT}" && _api_timeout 60 sudo -u www-data php artisan config:clear >/dev/null 2>&1) || true
+    systemctl restart cipi-queue 2>/dev/null || true
+    success "Config and APP_URL → https://${new}"
+
+    if [[ -n "$old" ]]; then
+        step "Old certificate (${old})..."
+        panel_cert_delete "$old" api
+    fi
+
+    local ssl_ok=false
+    if [[ "${ARG_no_ssl:-}" != "true" ]]; then
+        ( api_ssl ) && ssl_ok=true
+    fi
+
+    log_action "API MOVED: ${old:-?} → ${new}"
+    cipi_notify \
+        "Cipi API moved to ${new} on $(hostname)" \
+        "The panel API changed domain.\n\nServer: $(hostname)\nOld domain: ${old:-?}\nNew domain: ${new}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        api_configure
+    local scheme=https
+    [[ "$ssl_ok" == "true" ]] || scheme=http
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "  ${GREEN}${BOLD}Cipi API moved${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "  API:        ${CYAN}${scheme}://${new}/api${NC}"
+    echo -e "  MCP:        ${CYAN}${scheme}://${new}/mcp${NC}"
+    if [[ "$ssl_ok" != "true" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}No certificate yet.${NC} Point ${new} at this server, then: cipi api ssl"
+    fi
+    echo ""
+    echo -e "  Tokens and the IP whitelist are unchanged. Update the URL in every"
+    echo -e "  client of this server: GUI panel (Connections), cipi-cli, PHP SDK, MCP."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+}
+
+# ── API REMOVE (cipi api remove) ──────────────────────────────
+
+_api_is_installed() {
+    local pv
+    [[ -f "${CIPI_API_ROOT}/artisan" ]] && return 0
+    [[ -f "${CIPI_API_CONFIG}" ]] && return 0
+    [[ -f /etc/nginx/sites-available/cipi-api ]] && return 0
+    [[ -f /etc/systemd/system/cipi-queue.service ]] && return 0
+    [[ -f /etc/cron.d/cipi-api ]] && return 0
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+        [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" ]] && return 0
+    done
+    return 1
+}
+
+# Everything `cipi api <domain>` set up. Apps, databases and the rest of the
+# server are untouched. /etc/sudoers.d/cipi-api stays: it is part of every
+# Cipi install (setup.sh writes it) and migrations keep it current.
+api_remove() {
+    unset ARG_force
+    parse_args "$@"
+
+    if ! _api_is_installed; then
+        info "API is not installed — nothing to remove"
+        return 0
+    fi
+
+    local domain
+    domain=$(panel_domain api) || domain=""
+
+    if [[ "${ARG_force:-}" != "true" ]]; then
+        echo ""
+        warn "Will remove the Cipi API and MCP server: tokens, job history and config"
+        [[ -n "$domain" ]] && echo -e "  ${DIM}Domain: ${domain}${NC}"
+        echo -e "  ${DIM}GUI panels, cipi-cli and MCP clients that use this server lose access.${NC}"
+        confirm "Remove API?" || { info "Cancelled"; return; }
+    fi
+
+    step "Queue worker..."
+    systemctl stop cipi-queue 2>/dev/null || true
+    systemctl disable cipi-queue 2>/dev/null || true
+    rm -f /etc/systemd/system/cipi-queue.service
+    systemctl daemon-reload 2>/dev/null || true
+
+    step "Nginx..."
+    rm -f /etc/nginx/sites-enabled/cipi-api /etc/nginx/sites-available/cipi-api
+    reload_nginx 2>/dev/null || true
+
+    step "PHP-FPM..."
+    local pv
+    for pv in 7.4 8.0 8.1 8.2 8.3 8.4 8.5; do
+        if [[ -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf" ]]; then
+            rm -f "/etc/php/${pv}/fpm/pool.d/cipi-api.conf"
+            reload_php_fpm "$pv" 2>/dev/null || true
+        fi
+    done
+    rm -f /run/php/cipi-api.sock 2>/dev/null || true
+
+    step "Cron..."
+    rm -f /etc/cron.d/cipi-api /usr/local/bin/cipi-api-maintain /usr/local/bin/cipi-api-update \
+        /etc/logrotate.d/cipi-api-maintain /etc/logrotate.d/cipi-api-update
+
+    if [[ -n "$domain" ]]; then
+        step "SSL..."
+        panel_cert_delete "$domain" api
+    fi
+
+    # The upgrade backups hold the panel .env (APP_KEY) and the token database.
+    step "Application..."
+    rm -rf "${CIPI_API_ROOT:?}" "${CIPI_API_ROOT:?}.old" /tmp/cipi-api-build /tmp/cipi-api-backup-[0-9]* 2>/dev/null || true
+
+    step "Config..."
+    rm -f "${CIPI_API_CONFIG:?}" "${CIPI_API_IP_WHITELIST:?}" 2>/dev/null || true
+
+    rm -f /var/log/cipi-api-fpm-slow.log /var/log/cipi-api-php-error.log /var/log/cipi-queue.log \
+        /var/log/cipi-api-maintain.log* /var/log/cipi-api-update.log* \
+        /var/log/nginx/cipi-api-access.log* /var/log/nginx/cipi-api-error.log* 2>/dev/null || true
+
+    log_action "API REMOVED${domain:+: $domain}"
+    success "API removed"
+    echo -e "  ${DIM}Reinstall with: cipi api <domain>${NC}"
 }
 
 # ── TOKEN LIST ─────────────────────────────────────────────────
@@ -1614,6 +1798,8 @@ api_command() {
     case "$sub" in
         "")      error "Usage: cipi api <domain>"; exit 1 ;;
         ssl)     api_ssl ;;
+        move)    api_move "$@" ;;
+        remove|uninstall) api_remove "$@" ;;
         update)  api_update ;;
         upgrade) api_upgrade ;;
         status)  api_status ;;
@@ -1624,7 +1810,7 @@ api_command() {
             if validate_domain "$sub" 2>/dev/null; then
                 api_setup "$sub"
             else
-                error "Unknown: $sub"; echo "Use: <domain> | ssl | update | upgrade | status | fix-permissions | token list|create|revoke | ip-whitelist"; exit 1
+                error "Unknown: $sub"; echo "Use: <domain> | ssl | move <domain> | remove | update | upgrade | status | fix-permissions | token list|create|revoke | ip-whitelist"; exit 1
             fi ;;
     esac
 }

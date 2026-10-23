@@ -497,8 +497,10 @@ show_help_topic() {
         api)
             _help_topic_header "API"
             echo ""
-            _help_cmd "cipi api <domain>"              "Configure API at domain"
+            _help_cmd "cipi api <domain>"              "Configure API at its own (sub)domain"
             _help_cmd "cipi api ssl"                   "SSL for API domain"
+            _help_cmd "cipi api move <domain>"         "Move API to another domain (SSL included)"
+            _help_cmd "cipi api remove"                "Remove API, MCP, tokens and certificate"
             _help_cmd "cipi api update"                "Update Laravel + cipi-api"
             _help_cmd "cipi api upgrade"               "Full rebuild (fresh Laravel + package)"
             _help_cmd "cipi api status"                "Show API versions and status"
@@ -506,14 +508,17 @@ show_help_topic() {
             _help_cmd "cipi api ip-whitelist"          "API client IP allowlist  ${DIM}show|add|remove|set|allow-all${NC}"
             _help_cmd "cipi api fix-permissions"       "Fix panel API ownership (SQLite/logs)"
             _help_note "ip-whitelist default * (all IPs); add GUI server + operator IPs before locking down"
+            _help_note "The API needs a domain of its own (e.g. api.example.com), not an app's"
+            _help_note "move flags: --no-ssl   remove flags: --force (alias: uninstall)"
             echo ""
             ;;
 
         gui|panel)
             _help_topic_header "GUI"
             echo ""
-            _help_cmd "cipi gui <domain>"              "Configure web control panel"
+            _help_cmd "cipi gui <domain>"              "Configure panel at its own (sub)domain"
             _help_cmd "cipi gui ssl"                   "SSL for GUI domain"
+            _help_cmd "cipi gui move <domain>"         "Move GUI to another domain (SSL included)"
             _help_cmd "cipi gui update"                "Update cipi/gui, migrate, refresh theme"
             _help_cmd "cipi gui refresh-theme"         "Reload GUI CSS/views from package"
             _help_cmd "cipi gui upgrade"               "Full rebuild (fresh Laravel + package)"
@@ -523,7 +528,8 @@ show_help_topic() {
             _help_cmd "cipi gui reset-user"            "Reset admin email/password (clears 2FA)"
             _help_cmd "cipi gui remove"                "Remove GUI panel (alias: uninstall)"
             _help_note "reset-user flags: --email= --password= --name="
-            _help_note "remove flags: --force"
+            _help_note "move flags: --no-ssl   remove flags: --force"
+            _help_note "The GUI needs a domain of its own (e.g. panel.example.com), not an app's"
             _help_note "Requires cipi api on managed servers + API tokens"
             echo ""
             ;;

@@ -335,14 +335,21 @@ _cipi_complete() {
 
         api)
             case $pos in
-                1) sub="ssl update upgrade status token ip-whitelist fix-permissions" ;;
+                1) sub="ssl move remove update upgrade status token ip-whitelist fix-permissions" ;;
                 2) case "$w1" in
+                       remove)       sub="--force" ;;
                        token)        sub="list create revoke" ;;
                        ip-whitelist) sub="show add remove set allow-all" ;;
                    esac ;;
             esac ;;
 
-        gui|panel) [[ $pos -eq 1 ]] && sub="ssl update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
+        gui|panel)
+            case $pos in
+                1) sub="ssl move update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
+                2) case "$w1" in
+                       remove) sub="--force" ;;
+                   esac ;;
+            esac ;;
         git)
             case $pos in
                 1) sub="status github-token gitlab-token gitlab-url origin-token bitbucket-token azure-token codecommit-token remove-github remove-gitlab remove-origin remove-bitbucket remove-azure remove-codecommit refresh check" ;;

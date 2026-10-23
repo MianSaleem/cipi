@@ -1788,6 +1788,10 @@ _yml_build_plan() {
                 _YML_BLOCKERS+=("alias '${a}' already belongs to app '${DOMAIN_USED_BY_APP}'")
                 continue
             fi
+            if domain_is_used_by_panel "$a"; then
+                _YML_BLOCKERS+=("alias '${a}' is the domain of ${DOMAIN_USED_BY_PANEL}")
+                continue
+            fi
             _YML_ACTIONS+=("alias-add|${a}|add domain alias ${a}")
         done <<< "$want_aliases"
 

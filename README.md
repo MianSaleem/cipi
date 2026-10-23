@@ -549,6 +549,15 @@ MCP tools exposed: `health`, `app_info`, `deploy`, `logs`, `db_query`, `artisan`
 
 When you need to manage apps programmatically or integrate with external pipelines, enable the optional API layer with a single command. Bearer tokens, granular permissions, OpenAPI spec available, interactive Swagger docs.
 
+The API runs on a **domain or subdomain of its own**, pointed at the server: not the domain of an app, and not the GUI's. Cipi refuses a domain that an app already uses.
+
+```bash
+cipi api api.example.com              # install at its own subdomain
+cipi api ssl                          # Let's Encrypt certificate
+cipi api move api.newdomain.com       # change domain: old certificate out, new one in (--no-ssl to skip)
+cipi api remove                       # uninstall: tokens, jobs, vhost, crons, certificate
+```
+
 ### 🖥️ Web GUI (optional)
 
 A self-hosted control panel for operators who prefer a browser over SSH. One login manages any number of Cipi servers through their REST API: register each server with a token, then switch between them from the header on any page.
@@ -596,7 +605,7 @@ A self-hosted control panel for operators who prefer a browser over SSH. One log
 
 
 
-Install with **`cipi gui <domain>`** (then `cipi gui ssl`) — requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
+Install with **`cipi gui <domain>`** (then `cipi gui ssl`) on a domain or subdomain of its own, e.g. `panel.example.com`: not an app's domain and not the API's. Change it later with **`cipi gui move <domain>`** (certificate included), uninstall with **`cipi gui remove`**. The panel requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
 
 [Docs and screenshots](https://cipi.sh/docs/gui#gui-tour) · [GitHub](https://github.com/cipi-sh/gui)
 

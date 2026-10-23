@@ -4,6 +4,43 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.7.0] — 2026-10-23
+
+### Added — move the panel API and GUI to another domain, remove the API
+
+The API and the GUI each run on a domain of their own, with their own Nginx vhost and certificate. Until now, changing that domain meant running `cipi api <domain>` again. That rewrote the vhost without the lines certbot had added, so the API went back to plain HTTP. The certificate for the old domain stayed on the server and certbot kept trying to renew it.
+
+- **`cipi api move <domain>`** moves the API, MCP server and Swagger docs to a new domain. It keeps the same Laravel app, tokens, job history and IP whitelist. It rewrites the vhost, updates `api.json` and `APP_URL`, restarts the queue worker, deletes the old domain's certificate (including any `-0001` copies), then issues one for the new domain. `--no-ssl` skips the new certificate. If certbot fails, the move still completes and the output says what to fix before running `cipi api ssl`. If the new vhost fails `nginx -t`, the old vhost goes back and nothing else changes. Every client of the server needs the new URL: GUI connections, cipi-cli, the PHP SDK and MCP clients.
+- **`cipi gui move <domain>`** does the same for the control panel. Admins, 2FA and saved connections stay; admins sign in again, since sessions belong to the old domain. A GUI routed through Cloudflare Zero Trust is refused until `cipi zt hostname remove --gui`, because the tunnel route, DNS record and Access app belong to the old hostname. Afterwards run `cipi zt hostname add --gui`.
+- **`cipi api remove [--force]`** (alias `uninstall`) removes everything `cipi api <domain>` set up:
+  - the `cipi-queue` service
+  - the Nginx vhost and PHP-FPM pool
+  - the scheduler, maintenance and nightly update crons and their logrotate files
+  - the certificate
+  - `/opt/cipi/api`, `/opt/cipi/api.old` and the upgrade backups, which hold the panel `.env` and the token database
+  - `api.json`, the IP whitelist and the API logs
+
+  Apps, databases and the GUI are not touched. `/etc/sudoers.d/cipi-api` stays: every Cipi install has it, and migrations keep it current.
+- **`cipi gui remove`** also refuses a GUI that is still on the tunnel, and keeps a certificate that an app still uses.
+
+### Changed — a panel's domain is its own
+
+Customers put the API or the GUI on the domain of an app. Nginx then has two vhosts with the same `server_name`, serves only one of them, and the certificates overwrite each other's lines. Cipi now refuses that in both directions:
+
+- `cipi api <domain>`, `cipi gui <domain>` and both `move` commands refuse a domain or alias that belongs to an app, and refuse the other panel's domain. The error suggests a subdomain, for example `api.example.com`.
+- `cipi app create`, `cipi app edit --domain`, `cipi alias add`, `cipi app clone`, `cipi sync import` and cipi.yml aliases refuse the API or GUI domain.
+- `cipi api <domain>` and `cipi gui <domain>` on a panel that is already configured at another domain stop, and point to `move` (or to `remove` and a fresh setup). This replaces the silent change of domain.
+- `cipi api status` and `cipi gui status` warn when an existing panel shares its domain with an app or with the other panel, and suggest `move`.
+
+### Fixed
+
+- **`cipi gui ssl` reported success when certbot failed.** It now exits 1 with the same message as `cipi api ssl`, and names the certificate after the domain (`--cert-name`). The interactive certbot fallback is only offered when a terminal is attached.
+- **`cipi gui remove` deleted the certificate of its domain even when an app used the same domain.** It now keeps it, and says so.
+
+No migration: nothing on installed servers changes until one of these commands runs.
+
+---
+
 ## [5.6.4] — 2026-10-22
 
 ### Fixed — `cipi yml auto <app> on` did nothing on Git-webhook deploys

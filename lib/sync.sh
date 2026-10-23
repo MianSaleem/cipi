@@ -388,6 +388,10 @@ _sync_import() {
                 domain_conflict_msgs+=("  ${RED}✗${NC} '${app}' domain ${CYAN}${d}${NC} already used by app '${DOMAIN_USED_BY_APP}'")
                 [[ ! " ${blocked[*]} " =~ " ${app} " ]] && blocked+=("$app")
             fi
+            if domain_is_used_by_panel "$d" 2>/dev/null; then
+                domain_conflict_msgs+=("  ${RED}✗${NC} '${app}' domain ${CYAN}${d}${NC} is used by ${DOMAIN_USED_BY_PANEL} on this server")
+                [[ ! " ${blocked[*]} " =~ " ${app} " ]] && blocked+=("$app")
+            fi
             for other in "${apps[@]}"; do
                 [[ "$other" == "$app" ]] && continue
                 local other_dom other_aliases

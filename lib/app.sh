@@ -169,6 +169,7 @@ app_create() {
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
     domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
+    domain_is_used_by_panel "$domain" && { error "Domain '${domain}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"; exit 1; }
 
     if [[ -n "$octane_server" ]]; then
         octane_port=$(_octane_allocate_port) || {
@@ -947,6 +948,10 @@ _app_change_domain() {
     [[ "$new_domain" == "$old_domain" ]] && return 2
 
     validate_domain_or_wildcard "$new_domain" || { error "Invalid domain '${new_domain}'"; return 1; }
+    domain_is_used_by_panel "$new_domain" && {
+        error "Domain '${new_domain}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"
+        return 1
+    }
     domain_is_used_by_other_app "$new_domain" "$app" && {
         error "Domain '${new_domain}' is already used by app '${DOMAIN_USED_BY_APP}'"
         return 1
@@ -1872,6 +1877,7 @@ _alias_ensure() {
         return 1
     fi
     domain_is_used_by_other_app "$dom" "$app" && { error "Domain '${dom}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
+    domain_is_used_by_panel "$dom" && { error "Domain '${dom}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"; exit 1; }
     validate_domain "$dom" || { error "Invalid domain"; exit 1; }
     vault_read apps.json | jq --arg a "$app" --arg d "$dom" '.[$a].aliases+=[$d]|.[$a].aliases|=unique' | vault_write apps.json
     ensure_apps_json_api_access
@@ -1886,6 +1892,7 @@ alias_add() {
     local primary; primary=$(app_get "$app" domain)
     [[ "$dom" == "$primary" ]] && { error "'${dom}' is already the primary domain"; exit 1; }
     domain_is_used_by_other_app "$dom" "$app" && { error "Domain '${dom}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
+    domain_is_used_by_panel "$dom" && { error "Domain '${dom}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"; exit 1; }
     if vault_read apps.json | jq -e --arg a "$app" --arg d "$dom" '(.[$a].aliases // []) | index($d) != null' &>/dev/null; then
         info "'${dom}' is already an alias of '${app}'"; return
     fi
@@ -4164,6 +4171,7 @@ app_clone() {
     [[ -z "$domain" ]] && { error "--domain is required"; exit 1; }
     validate_domain_or_wildcard "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
     domain_is_used_by_other_app "$domain" && { error "Domain '${domain}' is already used by app '${DOMAIN_USED_BY_APP}'"; exit 1; }
+    domain_is_used_by_panel "$domain" && { error "Domain '${domain}' is used by ${DOMAIN_USED_BY_PANEL}: the panel has a domain of its own"; exit 1; }
 
     local name="${ARG_name:-}"
     if [[ -z "$name" ]]; then

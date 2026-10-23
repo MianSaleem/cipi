@@ -540,6 +540,15 @@ gui_setup() {
     [[ -z "$domain" ]] && { error "Usage: cipi gui <domain>"; exit 1; }
     validate_domain "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
 
+    local cur
+    if cur=$(panel_domain gui) && [[ "$cur" != "$domain" ]]; then
+        error "The GUI is already configured at ${cur}"
+        echo -e "  ${DIM}Change domain: cipi gui move ${domain}${NC}"
+        echo -e "  ${DIM}Start over:    cipi gui remove, then cipi gui ${domain}${NC}"
+        exit 1
+    fi
+    panel_domain_check "$domain" gui || exit 1
+
     _gui_cd_safe
 
     echo ""; info "Configuring Cipi GUI at ${domain}..."; echo ""
@@ -608,10 +617,117 @@ gui_ssl() {
     domain=$(vault_read gui.json | jq -r '.domain')
     [[ -z "$domain" || "$domain" == "null" ]] && { error "Domain not found in config."; exit 1; }
     step "Installing SSL for ${domain}..."
-    certbot --nginx -d "${domain}" --non-interactive --agree-tos --redirect 2>/dev/null \
-        || certbot --nginx -d "${domain}"
-    reload_nginx
-    success "SSL installed"
+    # Interactive certbot only as a fallback with a terminal (e.g. no ACME
+    # account yet); `cipi gui move` and scripts get a plain failure.
+    if certbot --nginx -d "${domain}" --cert-name "${domain}" --non-interactive --agree-tos --redirect 2>/dev/null \
+        || { [[ -t 0 ]] && certbot --nginx -d "${domain}" --cert-name "${domain}"; }; then
+        reload_nginx
+        log_action "GUI SSL INSTALLED: $domain"
+        success "SSL installed for ${domain}"
+    else
+        error "SSL failed. Check DNS, port 80, and domain."
+        exit 1
+    fi
+}
+
+# Hostname the GUI has on the Cloudflare tunnel (empty when it is not on it).
+_gui_zt_domain() {
+    [[ -f "${CIPI_CONFIG}/zt.json" ]] || return 0
+    vault_read zt.json 2>/dev/null | jq -r '.gui.domain // empty' 2>/dev/null || true
+}
+
+# The tunnel route, DNS record and Access app are tied to the old hostname.
+_gui_require_off_tunnel() {
+    local zd; zd=$(_gui_zt_domain)
+    [[ -z "$zd" ]] && return 0
+    error "The GUI (${zd}) is routed through Cloudflare Zero Trust"
+    echo -e "  ${DIM}First: cipi zt hostname remove --gui${NC}"
+    [[ "${1:-}" == move ]] && echo -e "  ${DIM}After the move: cipi zt hostname add --gui (and cipi zt access enable --gui)${NC}"
+    return 1
+}
+
+_gui_set_app_url() {
+    local envf="${CIPI_GUI_ROOT}/.env"
+    [[ -f "$envf" ]] || return 0
+    sed -i "s|^APP_URL=.*|APP_URL=https://${1}|" "$envf"
+    chown www-data:www-data "$envf" 2>/dev/null || true
+    chmod 640 "$envf" 2>/dev/null || true
+}
+
+# Same panel, admins, 2FA and saved connections on a new domain. The old
+# certificate is deleted and one is issued for the new domain (--no-ssl skips
+# it), since a vhost rewritten from scratch no longer carries certbot's lines.
+gui_move() {
+    local new="${1:-}"
+    shift || true
+    unset ARG_no_ssl
+    parse_args "$@"
+    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi gui move <new-domain> [--no-ssl]"; exit 1; }
+    validate_domain "$new" || { error "Invalid domain '${new}'"; exit 1; }
+    [[ -f "${CIPI_GUI_CONFIG}" && -f "${CIPI_GUI_ROOT}/artisan" ]] \
+        || { error "GUI not configured. Run: cipi gui <domain>"; exit 1; }
+
+    local old cfg
+    old=$(panel_domain gui) || old=""
+    [[ "$new" == "$old" ]] && { info "The GUI is already at ${new}"; return 0; }
+    panel_domain_check "$new" gui || exit 1
+    _gui_require_off_tunnel move || exit 1
+    cfg=$(vault_read gui.json | jq -c --arg d "$new" '.domain = $d') && [[ -n "$cfg" ]] \
+        || { error "Cannot read ${CIPI_GUI_CONFIG}"; exit 1; }
+
+    _gui_cd_safe
+    echo ""; info "Moving Cipi GUI: ${old:-?} → ${new}"; echo ""
+
+    # Nginx first: a config that fails `nginx -t` puts the old vhost back and
+    # leaves the panel where it was.
+    step "Nginx vhost..."
+    local vhost=/etc/nginx/sites-available/cipi-gui saved
+    saved=$(mktemp) || { error "mktemp failed"; exit 1; }
+    [[ -f "$vhost" ]] && cp -p "$vhost" "$saved"
+    _gui_create_nginx_vhost "$new"
+    ln -sf "$vhost" /etc/nginx/sites-enabled/cipi-gui
+    if ! reload_nginx; then
+        [[ -s "$saved" ]] && cp -p "$saved" "$vhost"
+        rm -f "$saved"
+        reload_nginx || true
+        error "Nginx rejected the new vhost — the GUI is still at ${old}"
+        exit 1
+    fi
+    rm -f "$saved"
+    success "Nginx → ${new}"
+
+    echo "$cfg" | vault_write gui.json
+    _gui_set_app_url "$new"
+    (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan optimize:clear >/dev/null 2>&1) || true
+    success "Config and APP_URL → https://${new}"
+
+    if [[ -n "$old" ]]; then
+        step "Old certificate (${old})..."
+        panel_cert_delete "$old" gui
+    fi
+
+    local ssl_ok=false
+    if [[ "${ARG_no_ssl:-}" != "true" ]]; then
+        ( gui_ssl ) && ssl_ok=true
+    fi
+
+    log_action "GUI MOVED: ${old:-?} → ${new}"
+    local scheme=https
+    [[ "$ssl_ok" == "true" ]] || scheme=http
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e " ${GREEN}${BOLD}Cipi GUI moved${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e " Login:   ${CYAN}${scheme}://${new}/login${NC}"
+    if [[ "$ssl_ok" != "true" ]]; then
+        echo ""
+        echo -e " ${YELLOW}No certificate yet.${NC} Point ${new} at this server, then: cipi gui ssl"
+    fi
+    echo ""
+    echo -e " Admins sign in again: sessions belong to the old domain."
+    echo -e " Managed servers need no change: their API IP whitelist is by IP, not domain."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
 }
 
 gui_update() {
@@ -706,6 +822,15 @@ gui_status() {
     echo ""
     echo -e "${BOLD}Cipi GUI Status${NC}"
     echo -e "  Domain:  ${CYAN}https://${domain}${NC}"
+    if [[ -n "$domain" && "$domain" != "null" ]]; then
+        if domain_is_used_by_other_app "$domain"; then
+            echo -e "  ${YELLOW}Shares its domain with app '${DOMAIN_USED_BY_APP}' — nginx serves only one of them.${NC}"
+            echo -e "  ${DIM}Give the GUI a subdomain of its own: cipi gui move <domain>${NC}"
+        elif domain_is_used_by_panel "$domain" gui; then
+            echo -e "  ${YELLOW}Shares its domain with ${DOMAIN_USED_BY_PANEL} — nginx serves only one of them.${NC}"
+            echo -e "  ${DIM}Give the GUI a subdomain of its own: cipi gui move <domain>${NC}"
+        fi
+    fi
     echo -e "  Root:    ${CIPI_GUI_ROOT}"
     [[ -f "${CIPI_GUI_ROOT}/artisan" ]] \
         && echo -e "  Laravel: $(cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan --version 2>/dev/null)" \
@@ -734,6 +859,8 @@ gui_remove() {
         [[ "$domain" == "null" ]] && domain=""
     fi
 
+    _gui_require_off_tunnel || exit 1
+
     if [[ "${ARG_force:-}" != "true" ]]; then
         echo ""
         warn "Will remove the Cipi GUI panel and all related config"
@@ -760,14 +887,14 @@ gui_remove() {
 
     if [[ -n "$domain" ]]; then
         step "SSL..."
-        certbot delete --cert-name "$domain" --non-interactive 2>/dev/null || true
+        panel_cert_delete "$domain" gui
     fi
 
     step "Application..."
-    rm -rf "${CIPI_GUI_ROOT}" "${CIPI_GUI_ROOT}.old" /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* 2>/dev/null || true
+    rm -rf "${CIPI_GUI_ROOT:?}" "${CIPI_GUI_ROOT:?}.old" /tmp/cipi-gui-build /var/tmp/cipi-gui-build.* 2>/dev/null || true
 
     step "Config..."
-    rm -f "${CIPI_GUI_CONFIG}" 2>/dev/null || true
+    rm -f "${CIPI_GUI_CONFIG:?}" 2>/dev/null || true
 
     rm -f /var/log/cipi-gui-fpm-slow.log /var/log/cipi-gui-php-error.log 2>/dev/null || true
 
@@ -846,13 +973,14 @@ gui_command() {
     case "$sub" in
         "")
             error "Usage: cipi gui <domain>"
-            echo "       cipi gui ssl | update | upgrade | status | fix-permissions | repair"
+            echo "       cipi gui ssl | move <domain> [--no-ssl] | update | upgrade | status | fix-permissions | repair"
             echo "       cipi gui refresh-theme"
             echo "       cipi gui remove [--force] | uninstall [--force]"
             echo "       cipi gui reset-user [--email=] [--password=] [--name=]"
             exit 1
             ;;
         ssl) gui_ssl ;;
+        move) gui_move "$@" ;;
         update) gui_update ;;
         upgrade) gui_upgrade ;;
         status) gui_status ;;
