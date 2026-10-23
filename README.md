@@ -320,7 +320,7 @@ cipi app create --octane
 cipi app convert myapp --to=octane   # or --to=fpm
 ```
 
-Nginx proxies to a localhost Octane port; Supervisor runs `${app}-octane`. Requires `laravel/octane` in the app repo (starts after the first successful deploy).
+Nginx proxies to a localhost Octane port; Supervisor runs `${app}-octane`. Requires `laravel/octane` in the app repo (starts after the first successful deploy). FrankenPHP gets the same PHP hardening as the FPM pools (`session.upload_progress.enabled` and `fatal_error_backtraces` off), from `/etc/php/cipi-octane.d` through `PHP_INI_SCAN_DIR`.
 
 ### 📡 Reverb, Horizon & Scheduler
 

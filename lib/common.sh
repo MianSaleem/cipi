@@ -432,6 +432,29 @@ fpm_pool_hardening() {
     fi
 }
 
+# The same settings for Octane apps. FrankenPHP runs the PHP built into its
+# own binary, so pool lines never reach it: each Octane program sets
+# PHP_INI_SCAN_DIR=:${OCTANE_INI_DIR} (_create_supervisor_octane). The leading
+# ':' keeps the compiled-in scan directory, so the php-cli that starts Octane
+# still loads its conf.d; the binary started by Octane inherits the variable.
+# Both keys are written whatever the binary's PHP: PHP ignores a key it does
+# not know. Loaded at startup, so ini_set() cannot turn upload progress back
+# on (PHP_INI_PERDIR). The 2026-10-23 advisory (CVE-2026-115560, no fix yet)
+# asks for the same session.upload_progress.enabled=0.
+OCTANE_INI_DIR="/etc/php/cipi-octane.d"
+octane_php_ini_ensure() {
+    local f="${OCTANE_INI_DIR}/99-cipi-hardening.ini" tmp
+    mkdir -p "$OCTANE_INI_DIR" && chmod 755 "$OCTANE_INI_DIR" || return 1
+    tmp=$(mktemp "${OCTANE_INI_DIR}/.hardening.XXXXXX") || return 1
+    cat > "$tmp" <<'EOF'
+; Written by Cipi; rewritten on update. Loaded by every Octane (FrankenPHP)
+; app through PHP_INI_SCAN_DIR in its Supervisor program.
+session.upload_progress.enabled = 0
+fatal_error_backtraces = 0
+EOF
+    chmod 644 "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
 # True if a systemd unit file exists.
 # Note: `systemctl list-unit-files --quiet UNIT` exits 0 even when zero units
 # match, so it must not be used as an existence check.
@@ -1326,10 +1349,12 @@ _create_supervisor_octane() {
     local app="$1" v="$2" port="$3"
     local workers
     workers=$(_app_limit "$app" octane_workers 2 16)
+    octane_php_ini_ensure || warn "Could not write ${OCTANE_INI_DIR} — '${app}' runs Octane without the PHP hardening"
     cat >> "/etc/supervisor/conf.d/${app}.conf" <<EOF
 [program:${app}-octane]
 process_name=%(program_name)s
 command=/usr/bin/php${v} /home/${app}/current/artisan octane:start --server=frankenphp --host=127.0.0.1 --port=${port} --workers=${workers} --max-requests=500
+environment=PHP_INI_SCAN_DIR=":${OCTANE_INI_DIR}"
 autostart=true
 autorestart=true
 startretries=10

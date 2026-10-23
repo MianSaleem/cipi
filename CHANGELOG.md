@@ -4,6 +4,25 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.7.1] — 2026-10-23
+
+### Security — PHP hardening for Octane apps (CVE-2026-115560)
+
+On 2026-10-23 the PHP project disclosed CVE-2026-115560, a remote code execution in session handling with no fixed release yet. Its mitigation is the one the 2026-10-21 advisory already gave for CVE-2026-109619: `session.upload_progress.enabled=0`. Since 5.6.3 every PHP-FPM pool Cipi writes carries it, so PHP-FPM apps, Node webhooks and the panel API and GUI need nothing new. Octane apps did not have it: FrankenPHP runs the PHP inside its own binary and never reads an FPM pool.
+
+- **Every Octane app now loads `/etc/php/cipi-octane.d/99-cipi-hardening.ini`** with `session.upload_progress.enabled = 0` and `fatal_error_backtraces = 0`, the same settings as `fpm_pool_hardening`. The `<app>-octane` Supervisor program sets `PHP_INI_SCAN_DIR=":/etc/php/cipi-octane.d"`. The leading `:` keeps the compiled-in scan directory, so the `php` that starts Octane still loads its `conf.d`, and Octane passes the variable on to the FrankenPHP binary. The settings load at startup, so `ini_set()` cannot turn upload progress back on. `fatal_error_backtraces` exists only from PHP 8.5; earlier PHP ignores the key.
+- The exploit needs an app that sets `session.serialize_handler` to `php_binary` or `php_serialize` and switches it to `php` with `ini_set()` before `session_start()`. Laravel does not use PHP's native sessions, so Laravel apps on Octane were not exposed to this CVE. The setting still closes the upload-progress path of CVE-2026-109619 on a FrankenPHP binary that is not yet on a patched PHP.
+
+### Migration
+
+`lib/migrations/5.7.1.sh`, on servers with Octane apps:
+
+1. Writes `/etc/php/cipi-octane.d/99-cipi-hardening.ini`.
+2. Renders each Octane app's Supervisor program again. The previous file is kept in `/var/lib/cipi/supervisor-backup-5.7.1/` and put back if `supervisorctl reread` refuses the new one.
+3. Restarts each rewritten Octane program, since the settings load at startup. Expect a few seconds without answers on those apps. A program that was stopped stays stopped.
+
+---
+
 ## [5.7.0] — 2026-10-23
 
 ### Added — move the panel API and GUI to another domain, remove the API
