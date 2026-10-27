@@ -4,6 +4,22 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.1] — 2026-10-27
+
+### Fixed — `cipi deploy` exited 1 after a successful deploy (the panel and the API showed it as *Failed*)
+
+Since 5.2.3 the success branch of `cipi deploy` ended on `[[ $post_rc -ne 0 ]] && return "$post_rc"`. With the post-deploy steps fine — or none declared — the test is false, the line's status is 1, and under `set -e` that 1 became the exit code of a command that had just printed `✓ Deploy completed`. In a shell `$?` was 1; cipi/api marks a job by the exit code, so every deploy started from the GUI, the API, the CLI client or an MCP tool ended as **Failed**, with the success line quoted as the error and the Git-key hints under it. The release was live each time and nothing was rolled back. Webhook deploys take another path (`cipi-app-deploy`) and were not affected.
+
+- The branch returns the post-deploy status itself: 0 when the steps passed, the step's code when one failed with `post_on_failure: abort`, 1 with `warn`.
+- `cipi deploy` prints the post-deploy steps as they run and ends them with `✓ Post-deploy: <summary>` (`[ERROR] Post-deploy: …` when one failed). The heading, the per-step lines and the verdict were captured into the summary before, so they reached the notification mail and never the terminal or the panel's job output; the mail keeps the one-line summary. `cipi yml post-deploy <app>` shows its steps the same way.
+- No migration.
+
+### Ecosystem
+
+- cipi/gui 4.0.1 tells a deploy that published and then failed from a failed one, and names this bug for servers before 5.8.1.
+
+---
+
 ## [5.8.0] — 2026-10-27
 
 A request from the field: one repository deployed as a staging app and as a production app, and one `cipi.yml` that could not serve both — its databases must be named after the app, its healthcheck must sit on the app's domain, its aliases differ. The file now follows the app's environment, and it can say which branch to deploy.

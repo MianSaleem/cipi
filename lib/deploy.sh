@@ -253,7 +253,11 @@ _deploy_run() {
             "Cipi deploy succeeded: ${app} release ${rel_after:-?} on $(hostname)" \
             "Deploy completed successfully.\n\n$(_deploy_release_details "$app" "$rel_after" "$branch_disp" "$secs")Previous release: ${rel_before:-none}\nPost-deploy: ${post_line}\n${yml_mail}Healthcheck: ${health_line}\n" \
             deploy_success
-        [[ $post_rc -ne 0 ]] && return "$post_rc"
+        # A plain return: `[[ … ]] && return` on this line was false (status 1)
+        # whenever the steps passed, and under `set -e` that 1 became the exit
+        # code of a deploy that had just published — the API and the panel
+        # reported every successful deploy as failed.
+        return "$post_rc"
     else
         deploy_log_close "$app" "FAILED" "$rel_after" "$secs" "$rc"
         error "Deploy failed (exit $rc)"
@@ -446,13 +450,21 @@ _deploy_run_post_deploy() {
     php_ver=$(app_get "$app" php)
     [[ -n "$php_ver" ]] || { echo "skipped (no php version)"; return 0; }
     lf=$(deploy_log_file "$app")
-    echo ""
-    step "Post-deploy steps (cipi.yml)..."
+    # Stdout is the one-line summary the caller quotes in its notification. The
+    # heading, the per-step lines and the verdict go to stderr, where a terminal
+    # and the API's job output see them (before, they were captured into the
+    # summary and reached the mail only).
+    { echo ""; step "Post-deploy steps (cipi.yml)..."; } >&2
     set +e
     summary=$(_yml_post_deploy_run "$app" "$php_ver" "$lf" false root)
     rc=$?
     set -e
     chown "${app}:www-data" "$lf" 2>/dev/null || true
+    if [[ $rc -eq 0 ]]; then
+        success "Post-deploy: ${summary}" >&2
+    else
+        error "Post-deploy: ${summary}"
+    fi
     printf '%s' "$summary"
     return "$rc"
 }

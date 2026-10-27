@@ -3353,9 +3353,11 @@ _yml_post_deploy_run() {
 
     on_fail=$(echo "$result" | jq -r '.data.deploy.post_on_failure // "warn"')
 
+    # The deploy log only: stdout is the summary line the callers capture, and
+    # the terminal gets one `step` line per step on stderr below.
     _yml_post_deploy_log() {
         [[ -n "$lf" ]] && printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$1" >> "$lf" 2>/dev/null || true
-        [[ "$quiet" != "true" ]] && printf '%s\n' "$1"
+        return 0
     }
 
     _yml_post_deploy_log "===== post-deploy steps (${n}, post_on_failure=${on_fail}) ====="
@@ -3364,7 +3366,7 @@ _yml_post_deploy_run() {
         run=$(echo "$steps" | jq -r ".[$i].run")
         mapfile -t argv < <(echo "$steps" | jq -r ".[$i].argv[]?")
         line="${run} ${argv[*]}"
-        [[ "$quiet" != "true" ]] && step "Post-deploy [$((i+1))/${n}]: ${line}"
+        [[ "$quiet" != "true" ]] && step "Post-deploy [$((i+1))/${n}]: ${line}" >&2
         _yml_post_deploy_log "post-deploy [$((i+1))/${n}]: ${line}"
 
         step_rc=0
