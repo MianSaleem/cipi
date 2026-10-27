@@ -419,7 +419,7 @@ _bk_profile_command() {
         remove|rm|delete) _bk_profile_remove "$@" ;;
         enable)   _bk_profile_toggle "${1:-}" true ;;
         disable)  _bk_profile_toggle "${1:-}" false ;;
-        *) error "Use: cipi backup profile list|show|add|edit|remove|enable|disable"; exit 1 ;;
+        *) error "Use: cipi backup profile list|show|add|edit|remove [--purge]|enable|disable"; exit 1 ;;
     esac
 }
 
@@ -536,18 +536,65 @@ _bk_profile_delete() {
     return 0
 }
 
+# cipi backup profile remove <name> [--purge]
+# The archives a profile wrote outlive it: `cipi backup prune` ages them out
+# with the longest retention a remaining profile sets, and with none they
+# stayed for good. --purge deletes every run of the profile now, on every
+# destination; on a terminal the question is asked. --purge also works for
+# a profile that is already gone, to clear what it left behind.
 _bk_profile_remove() {
-    local p="${1:-}"
-    [[ -z "$p" ]] && { error "Usage: cipi backup profile remove <name>"; exit 1; }
+    local p="${1:-}"; shift || true
+    [[ -z "$p" ]] && { error "Usage: cipi backup profile remove <name> [--purge]"; exit 1; }
+    _bk_valid_profile_name "$p" || { error "Invalid profile name: ${p}"; exit 1; }
+    parse_args "$@"
+    local purge="${ARG_purge:-false}" exists=true
     _bk_require_config
-    _bk_profile_exists "$p" || { error "No such profile: ${p}"; exit 1; }
-    if [[ -t 0 ]]; then
-        warn "Removing the profile does not delete the archives it already wrote."
-        confirm "Remove backup profile '${p}'?" || { info "Cancelled"; return 0; }
+    _bk_profile_exists "$p" || exists=false
+
+    local runs="" n=0
+    runs=$(_bk_list_runs "$p" 2>/dev/null | grep -E '^[0-9]{4}-' | sort -u || true)
+    [[ -n "$runs" ]] && n=$(wc -l <<< "$runs" | tr -d ' ')
+
+    if [[ "$exists" == false ]]; then
+        if [[ "$purge" == "true" && "$n" -gt 0 ]]; then
+            info "No profile '${p}' — deleting the ${n} archive run(s) it left behind"
+        elif [[ "$purge" == "true" ]]; then
+            info "No profile '${p}' and no archives of it"; return 0
+        else
+            error "No such profile: ${p}"; exit 1
+        fi
+    else
+        if [[ -t 0 ]]; then
+            confirm "Remove backup profile '${p}'?" || { info "Cancelled"; return 0; }
+            if [[ "$purge" != "true" && "$n" -gt 0 ]]; then
+                echo -e "  ${DIM}It wrote ${n} archive run(s), kept on every destination: $(_bk_orphan_note "$p").${NC}"
+                confirm "Delete those archives now too?" && purge=true
+            fi
+        fi
+        _bk_profile_delete "$p" || return 1
+        success "Profile '${p}' removed"
+        log_action "BACKUP PROFILE REMOVE: $p"
     fi
-    _bk_profile_delete "$p" || return 1
-    success "Profile '${p}' removed"
-    log_action "BACKUP PROFILE REMOVE: $p"
+
+    if [[ "$purge" != "true" ]]; then
+        [[ "$n" -gt 0 ]] && info "${n} archive run(s) kept — $(_bk_orphan_note "$p"). Delete them: cipi backup profile remove ${p} --purge"
+        return 0
+    fi
+    [[ "$n" -gt 0 ]] || { info "No archives to delete"; return 0; }
+    step "Deleting ${n} archive run(s) of '${p}' on every destination..."
+    _BK_PRUNE_ERRORS=""
+    local ts
+    while IFS= read -r ts; do
+        [[ -n "$ts" ]] || continue
+        _bk_delete_run "$p" "$ts"
+    done <<< "$runs"
+    rmdir "$(_bk_local_root)/${p}" 2>/dev/null || true
+    if [[ -n "$_BK_PRUNE_ERRORS" ]]; then
+        error "Some archives could not be deleted: ${_BK_PRUNE_ERRORS}"
+        return 1
+    fi
+    success "Archives of '${p}' deleted (${n} run(s))"
+    log_action "BACKUP PROFILE PURGE: $p runs=${n}"
 }
 
 # Comma-separated CLI value → JSON array (empty string → []).

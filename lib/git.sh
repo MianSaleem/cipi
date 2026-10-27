@@ -226,6 +226,55 @@ _git_http_body() { printf '%s\n' "$1" | sed '$d'; }
 # ssh-ed25519 AAAA... comment → type + material (ignore comment)
 _git_key_blob() { awk '{print $1, $2}' <<< "$1"; }
 
+# ── Why a forge refused a call ───────────────────────────────
+# A bare "HTTP 404: Not Found" sent people looking for a missing repository
+# when the token was the problem: GitHub answers 404, not 403, to a token
+# that may not see or administer a repository.
+_github_access_hint() {
+    echo "check the repository name in the app's repository URL, then the token: a fine-grained token must list the repository under 'Repository access' with 'Administration: Read and write' (deploy keys) and 'Webhooks: Read and write'; a classic token needs the 'repo' and 'admin:repo_hook' scopes. Save a new one with: cipi git github-token <token>"
+}
+_gitlab_access_hint() {
+    echo "check the project path in the app's repository URL, then the token: it needs the 'api' scope and the Maintainer role on the project. Save a new one with: cipi git gitlab-token <token>"
+}
+_bitbucket_access_hint() {
+    echo "check the workspace/repository in the app's repository URL, then the token: it needs 'Repositories: Admin' (deploy keys) and 'Webhooks: Read and write'. Save a new one with: cipi git bitbucket-token <token>"
+}
+
+# One line per failed call: what, where, the HTTP code, and what it means.
+# Usage: _git_api_fail <github|gitlab|bitbucket> <what> <repo> <code> <body>
+_git_api_fail() {
+    local provider="$1" what="$2" repo="$3" code="$4" body="$5" label msg hint
+    label=$(_git_provider_label "$provider")
+    msg=$(printf '%s' "$body" | jq -r '.error.message // .message // empty' 2>/dev/null | head -1)
+    hint=$("_${provider}_access_hint")
+    case "$code" in
+        404) error "${label} ${what} failed (HTTP 404): '${repo}' is not visible to the saved token — ${hint}" ;;
+        403) error "${label} ${what} failed (HTTP 403): ${msg:-forbidden} — ${hint}" ;;
+        401) error "${label} ${what} failed (HTTP 401): the saved token was rejected (revoked or expired) — save a new one: cipi git ${provider}-token <token>" ;;
+        ""|000) error "${label} ${what} failed: no answer from the API (network, DNS or a missing token)" ;;
+        *)   error "${label} ${what} failed (HTTP ${code}): ${msg:-no message}" ;;
+    esac
+}
+
+# Can the saved token see the repository at all? Decides, after a refused
+# deploy key, between "this key already hangs on another repository" (rotate
+# it) and "the token cannot reach the repository" (rotating would only lose
+# the key that works). 0 = visible, 1 = not visible (GIT_REPO_VISIBLE_CODE
+# holds the HTTP code), 2 = no way to tell for this provider.
+GIT_REPO_VISIBLE_CODE=""
+_git_repo_visible() {
+    local provider="$1" repo="$2" resp="" code
+    case "$provider" in
+        github)    resp=$(_github_api GET "/repos/${repo}") || resp="" ;;
+        gitlab)    resp=$(_gitlab_api GET "/projects/${repo}") || resp="" ;;
+        bitbucket) resp=$(_bitbucket_api GET "/repositories/$(_bitbucket_ws_repo "$repo")") || resp="" ;;
+        *) return 2 ;;
+    esac
+    code=$(_git_http_code "$resp")
+    GIT_REPO_VISIBLE_CODE="${code:-000}"
+    [[ "$code" == "200" ]]
+}
+
 _github_get_json() {
     local endpoint="$1"
     local resp; resp=$(_github_api GET "$endpoint") || true
@@ -284,7 +333,7 @@ _github_add_deploy_key() {
             return 0
         fi
     fi
-    error "GitHub deploy key failed (HTTP ${code}): $(echo "$body" | jq -r '.message // empty')"
+    _git_api_fail github "deploy key" "$owner_repo" "$code" "$body"
     return 1
 }
 
@@ -310,7 +359,7 @@ _github_add_webhook() {
         echo "$body" | jq -r '.id'
         return 0
     fi
-    error "GitHub webhook failed (HTTP ${code}): $(echo "$body" | jq -r '.message // empty')"
+    _git_api_fail github "webhook" "$owner_repo" "$code" "$body"
     return 1
 }
 
@@ -398,7 +447,7 @@ _gitlab_add_deploy_key() {
             return 0
         fi
     fi
-    error "GitLab deploy key failed (HTTP ${code}): $(echo "$body" | jq -r '.message // empty')"
+    _git_api_fail gitlab "deploy key" "${project_id//%2F//}" "$code" "$body"
     return 1
 }
 
@@ -424,7 +473,7 @@ _gitlab_add_webhook() {
         echo "$body" | jq -r '.id'
         return 0
     fi
-    error "GitLab webhook failed (HTTP ${code}): $(echo "$body" | jq -r '.message // empty')"
+    _git_api_fail gitlab "webhook" "${project_id//%2F//}" "$code" "$body"
     return 1
 }
 
@@ -625,7 +674,7 @@ _bitbucket_add_deploy_key() {
             return 0
         fi
     fi
-    error "Bitbucket deploy key failed (HTTP ${code}): $(echo "$body" | jq -r '.error.message // .message // empty')"
+    _git_api_fail bitbucket "deploy key" "$owner_repo" "$code" "$body"
     return 1
 }
 
@@ -653,7 +702,7 @@ _bitbucket_add_webhook() {
         echo "$body" | jq -r '.uuid'
         return 0
     fi
-    error "Bitbucket webhook failed (HTTP ${code}): $(echo "$body" | jq -r '.error.message // .message // empty')"
+    _git_api_fail bitbucket "webhook" "$owner_repo" "$code" "$body"
     return 1
 }
 
@@ -1082,19 +1131,30 @@ git_setup_repo() {
     if [[ "$provider" == "codecommit" ]]; then
         pub_key=$(_codecommit_app_pubkey "$app") || pub_key=""
     fi
-    GIT_DEPLOY_KEY_ID=$(_git_add_deploy_key "$provider" "$repo_id" "cipi:${app}" "$pub_key" 2>&1) || {
-        warn "Could not add deploy key to ${label} — add it manually"
+    # The forge's answer is kept (GIT_SETUP_KEY_ERROR, GIT_SETUP_HOOK_ERROR)
+    # for the create summary: swallowing it left "add it manually" with no
+    # reason, and the panel showed nothing at all.
+    GIT_SETUP_KEY_ERROR="" GIT_SETUP_HOOK_ERROR=""
+    local out
+    if out=$(_git_add_deploy_key "$provider" "$repo_id" "cipi:${app}" "$pub_key" 2>&1); then
+        GIT_DEPLOY_KEY_ID="$out"
+    else
         GIT_DEPLOY_KEY_ID=""
-    }
+        GIT_SETUP_KEY_ERROR=$(_git_last_message "$out")
+        warn "Could not add the deploy key to ${label}: ${GIT_SETUP_KEY_ERROR:-no answer}"
+    fi
     if [[ "$provider" == "codecommit" && -n "$GIT_DEPLOY_KEY_ID" ]]; then
         _codecommit_write_ssh_config "$app" "$GIT_DEPLOY_KEY_ID"
     fi
 
     if _git_provider_webhooks "$provider" && [[ "$skip_webhook" != "skip_webhook" && -n "$webhook_token" ]]; then
-        GIT_WEBHOOK_ID=$(_git_add_webhook "$provider" "$repo_id" "$webhook_url" "$webhook_token" 2>&1) || {
-            warn "Could not add webhook to ${label} — add it manually"
+        if out=$(_git_add_webhook "$provider" "$repo_id" "$webhook_url" "$webhook_token" 2>&1); then
+            GIT_WEBHOOK_ID="$out"
+        else
             GIT_WEBHOOK_ID=""
-        }
+            GIT_SETUP_HOOK_ERROR=$(_git_last_message "$out")
+            warn "Could not add the webhook to ${label}: ${GIT_SETUP_HOOK_ERROR:-no answer}"
+        fi
     elif [[ "$skip_webhook" != "skip_webhook" && -n "$webhook_token" ]] && ! _git_provider_webhooks "$provider"; then
         info "${label} has no HTTP deploy webhook — trigger deploys with: cipi deploy ${app}"
     fi
@@ -1104,10 +1164,18 @@ git_setup_repo() {
     elif [[ -n "$GIT_DEPLOY_KEY_ID" && -n "$GIT_WEBHOOK_ID" ]]; then
         success "${label} deploy key + webhook configured automatically"
     elif [[ -n "$GIT_DEPLOY_KEY_ID" ]]; then
-        success "${label} deploy key added (webhook needs manual setup)"
+        success "${label} deploy key added"
+        warn "No webhook: a push will not deploy until it exists — fix the token, then: cipi git refresh ${app}"
     elif [[ -n "$GIT_WEBHOOK_ID" ]]; then
         success "${label} webhook added (deploy key needs manual setup)"
     fi
+}
+
+# The last non-empty line of a captured error, without colours or the
+# "[ERROR]" prefix: what the forge said, ready for a summary line.
+_git_last_message() {
+    printf '%s\n' "$1" | sed -e 's/\x1b\[[0-9;]*m//g' -e 's/^\[ERROR\] //' -e 's/^\[WARN\] //' \
+        | grep -v '^[[:space:]]*$' | tail -1
 }
 
 # ── REPOSITORY ACCESS ────────────────────────────────────────
@@ -1581,7 +1649,17 @@ git_refresh_app() {
         new_key_id=$(_git_find_deploy_key_id "$provider" "$repo_id" "$pub_key") || true
     fi
     # Same pubkey already used as a deploy key on another repo / account slot.
+    # Only when the token can see the repository: a 404/401/403 is the token
+    # or the URL, and a new key would not change that — it would only drop
+    # the key the old repository still accepts.
     if [[ -z "$new_key_id" || "$new_key_id" == "null" ]] && [[ "$did_rotate_keys" != "true" ]]; then
+        local visible=0
+        _git_repo_visible "$provider" "$repo_id" || visible=$?
+        if [[ $visible -eq 1 ]]; then
+            error "${app}: could not add ${label} deploy key — '${repo_id}' is not reachable with the saved token (HTTP ${GIT_REPO_VISIBLE_CODE})"
+            info "Fix the token or the repository URL, then run again: cipi git refresh ${app}"
+            return 1
+        fi
         warn "${app}: deploy key already used on another repo — generating a new one"
         pub_key=$(_git_rotate_local_key "$app") || {
             error "${app}: could not rotate SSH key"
@@ -1592,6 +1670,7 @@ git_refresh_app() {
     fi
     if [[ -z "$new_key_id" || "$new_key_id" == "null" ]]; then
         error "${app}: could not add ${label} deploy key"
+        info "Once the token is right, run again: cipi git refresh ${app}"
         return 1
     fi
     if [[ "$provider" == "codecommit" ]]; then

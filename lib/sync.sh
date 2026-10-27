@@ -645,6 +645,10 @@ BASH
     local app_json
     app_json=$(jq --arg a "$app" --arg e "$eng" '.[$a] + {engine: (.[$a].engine // $e)}' "${dir}/config/apps.json")
     app_save "$app" "$app_json"
+    # The webhook of cipi/agent reads the deploy branch from .env (5.7.2).
+    if [[ "$(app_get "$app" runtime)" != "node" ]]; then
+        app_env_set_deploy_branch "$app" "$branch"
+    fi
 
     # 11. PHP-FPM (skipped for Octane apps)
     local sync_octane sync_octane_port
@@ -866,6 +870,10 @@ _sync_update_app() {
     local app_json; app_json=$(jq --arg a "$app" '.[$a]' "${dir}/config/apps.json")
     app_save "$app" "$app_json"
     _sync_yml_auto_sudoers "$app"
+    # The webhook of cipi/agent reads the deploy branch from .env (5.7.2).
+    if [[ "$(app_get "$app" runtime)" != "node" ]]; then
+        app_env_set_deploy_branch "$app" "$branch"
+    fi
 
     # 7. Regenerate nginx vhost (picks up alias changes / Octane proxy)
     step "Nginx..."

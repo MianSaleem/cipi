@@ -65,7 +65,7 @@ _help_topic_header() {
 
 _help_topics_list() {
     cat <<'EOF'
-app  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
+app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
 php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
 git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
 EOF
@@ -95,6 +95,7 @@ show_help() {
     echo ""
     echo -e "  ${BOLD}Apps & deploy${NC}"
     _help_cmd "cipi app ..."               "Create, edit, logs, env, ..."
+    _help_cmd "cipi use <app>"             "Default app for the per-app commands  ${DIM}[--clear]${NC}"
     _help_cmd "cipi node ..."              "Node frontends: SPA, static, SSR  ${DIM}install|status|restart${NC}"
     _help_cmd "cipi domains / alias / www" "Domains, aliases & www redirects"
     _help_cmd "cipi redirect / proxy ..."  "Nginx redirects & prefix reverse proxies"
@@ -304,6 +305,20 @@ show_help_topic() {
             _help_cmd "cipi basicauth disable <app>"   "Remove HTTP basic auth"
             _help_cmd "cipi basicauth status <app>"    "Show basic auth status"
             echo ""
+            ;;
+
+        use|default)
+            _help_topic_header "Default app"
+            echo ""
+            _help_cmd "cipi use <app>"                 "Make <app> the default of the commands that need one"
+            _help_cmd "cipi use"                       "Show the default"
+            _help_cmd "cipi use --clear"               "Remove it"
+            echo ""
+            _help_note "With a default, cipi deploy, cipi app logs|env|artisan|edit, cipi yml plan|apply, cipi worker list,"
+            _help_note "cipi ssl install, cipi www …, cipi alias …, cipi health … run against it when no app is given,"
+            _help_note "and print '→ <app>' on stderr. CIPI_APP=<app> does the same for one shell and wins over the file."
+            _help_note "Where a missing app means every app (cipi git refresh|check, cipi scan) nothing changes, and"
+            _help_note "cipi app delete|reset-password|reset-db-password|convert|clone and cipi db … still need the name."
             ;;
 
         deploy|deployment)
@@ -998,10 +1013,19 @@ main() {
 
     local cmd="$1"; shift || true
 
+    # `cipi use <app>`: where a command needs an app and none was given, the
+    # default is filled in (lib/use.sh). Nothing to do when none is set.
+    if [[ "$cmd" != "use" ]] && [[ -n "${CIPI_APP:-}" || -f /var/lib/cipi/default-app ]]; then
+        source "${CIPI_LIB}/use.sh"
+        use_fill_args "$cmd" "$@"
+        if [[ ${#USE_ARGV[@]} -gt 0 ]]; then set -- "${USE_ARGV[@]}"; else set --; fi
+    fi
+
     case "$cmd" in
         help|--help|-h)       show_help "$@" ;;
         version|--version|-v) echo "Cipi v${CIPI_VERSION}" ;;
         completion)           source "${CIPI_LIB}/completion.sh"; completion_command "$@" ;;
+        use)        _maybe_cmd_help use "$@";        require_root; source "${CIPI_LIB}/use.sh";         use_command "$@" ;;
         status)     require_root; show_status ;;
         disk)       _maybe_cmd_help server "$@";     require_root; source "${CIPI_LIB}/disk.sh";        disk_command "$@" ;;
         app)        _maybe_cmd_help app "$@";        require_root; source "${CIPI_LIB}/app.sh";         app_command "$@" ;;

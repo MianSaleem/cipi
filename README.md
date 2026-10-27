@@ -151,7 +151,7 @@ cipi zt enable          # Cloudflare Zero Trust: tunnel + real_ip, ports stay op
 cipi scan enable        # nightly: release integrity + ClamAV on uploads
 ```
 
-Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
+Ubuntu security updates land daily via `unattended-upgrades`. PHP patch releases are applied every night at 03:30 by `cipi php upgrade`, which restarts PHP-FPM after an upgrade and reports each version's security patch level. The mitigations of the 2026-10-21 PHP advisory (`session.upload_progress.enabled`, `fatal_error_backtraces`) are in every FPM pool, in each version's `fpm/conf.d/99-cipi.ini` and in the ini Octane apps load. **Nginx, MariaDB, PostgreSQL and Valkey are left alone until you ask** — restarting a database at 04:00 is not a surprise Cipi will create:
 
 ```bash
 cipi nginx upgrade                 # nginx.org mainline, config test, reload
@@ -164,7 +164,7 @@ Patch-level only (`apt --only-upgrade` of what is already installed). Cipi confi
 
 ### ⚡ Zero-Downtime Deploys
 
-Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`).
+Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`). `cipi deploy <app> --releases` lists the releases with their commit and how long each deploy took.
 
 Every deploy is recorded in a root-owned, hash-chained **audit ledger** (`/var/log/cipi/deploys.jsonl`, also sent to syslog), whatever started it: `cipi deploy`, the Git webhook, cipi/agent, the panel, or `dep deploy` run by hand. Each record has the release, the commit, and who started the deploy, read by root from the process chain: origin, login user and SSH address. `cipi deploy <app> --audit` shows it.
 
@@ -174,6 +174,9 @@ Backups are driven by **profiles**: each one decides what it takes (application
 files, databases, or both), which apps and databases it covers, how often it
 runs, where it lands and how long it is kept. A 30-minute database-only copy
 kept on disk sits happily next to a nightly full copy encrypted to S3.
+Removing a profile keeps its archives until retention ages them out;
+`cipi backup profile remove <name> --purge` deletes them now, on every
+destination (on a terminal, the question is asked).
 
 ```bash
 cipi backup profile add hourly-db --scope=db \
@@ -373,7 +376,7 @@ Already in the base stack, so not in the list: the **Imagick PHP extension**, **
 
 ### 🔗 Webhook Auto-Deploy
 
-Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https://azure.microsoft.com/products/devops), [Cursor Origin](https://cursor.com/origin), and [AWS CodeCommit](https://aws.amazon.com/codecommit/) integration — deploy keys (and webhooks where the forge has them) configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material). `cipi app create` and `cipi app edit --repository` / `--branch` test the deploy key against the repository on the spot: when it cannot read it, Cipi says why and — on a terminal — offers to save or replace the forge token, registers the key and checks again. `cipi git check [app]` repeats the test at any time.
+Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https://azure.microsoft.com/products/devops), [Cursor Origin](https://cursor.com/origin), and [AWS CodeCommit](https://aws.amazon.com/codecommit/) integration — deploy keys (and webhooks where the forge has them) configured automatically. HMAC signature verification. Or plug in any custom Git provider. If a token expires and keys/webhooks drift, `cipi git refresh` re-registers them on every app (`--rotate-keys` / `--rotate-secret` to mint new material). `cipi app create` and `cipi app edit --repository` / `--branch` test the deploy key against the repository on the spot: when it cannot read it, Cipi says why and — on a terminal — offers to save or replace the forge token, registers the key and checks again. `cipi git check [app]` repeats the test at any time. When the forge refuses the key or the webhook, the summary and `cipi git refresh` say what it answered and what the token needs — a GitHub 404 is a token that cannot see the repository, not a missing one. The branch to deploy goes into `.env` as `CIPI_DEPLOY_BRANCH`, so a push to any other branch is ignored.
 
 ### 📦 App Types
 
@@ -383,7 +386,7 @@ Clone an app for staging with **`cipi app clone <src> --domain=…`**.
 
 ### 🌐 Aliases, www & SSL
 
-Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`**. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards. Auto-renew handles the rest.
+Add multiple domains or subdomains to any app. A domain can be a **wildcard** (`*.example.com`), as the app's primary domain or as an alias — multi-tenant apps get one vhost for every tenant. Manage www/apex aliases and canonical redirects with **`cipi www`** — also on a wildcard primary: `cipi www force-from-root` sends `example.com` to `www.example.com`, which `*.example.com` serves. A single SAN certificate covers all of them — HTTP-01 by default, or **DNS-01 via Cloudflare** for wildcards. Auto-renew handles the rest.
 
 **Wildcard / multi-tenant in three commands** (DNS of the zone on Cloudflare — proxied or not — and a `*` record pointing at the server):
 
@@ -509,6 +512,19 @@ cipi app limits shop --disk=none    # back to no limit (the default)
 ```
 
 `cipi disk` then shows the limit next to the app (`10 GB (30%)`, and `over` once it is passed), and `cipi monitor` sends the alert: a warning at 90% of the limit, a critical one when the app is over it, a message when it is back under. Each app is alerted on its own. The limit is set on the server only; it cannot be changed from the app's `cipi.yml`.
+
+### 🎯 One App at a Time: `cipi use`
+
+Working on one app for a while? Name it once and drop it from the commands that need one:
+
+```bash
+cipi use shop            # default for cipi deploy, app logs|env|artisan, yml plan|apply, worker, ssl install, www, alias …
+cipi deploy              # → shop (default app — cipi use)
+cipi app logs --type=php
+cipi use --clear
+```
+
+It fills in a missing app only where one is required today, and says so on stderr. Commands where a missing app means every app (`cipi git refresh`, `cipi scan`) keep that meaning, and destructive ones (`cipi app delete`, `reset-password`, `cipi db …`) still want the name. `CIPI_APP=shop` does the same for one shell.
 
 ### ⌨️ Tab-Completion That Is Already There
 

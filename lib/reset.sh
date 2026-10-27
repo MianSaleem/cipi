@@ -90,9 +90,32 @@ reset_db_root_password() {
 
 # ── VALKEY PASSWORD ──────────────────────────────────────────
 
+# REDIS_PASSWORD in every app's shared/.env that still holds the previous
+# password: since 5.7.2 `cipi app create` writes it there, so a reset has to
+# follow or every app that moved cache, session or queue to Valkey breaks.
+# A value someone set by hand (another password) is not touched. Prints the
+# names of the apps it updated, one per line.
+# Usage: _reset_valkey_env_sync <old_password> <new_password>
+_reset_valkey_env_sync() {
+    local old="$1" new="$2" app env old_re new_esc
+    [[ -n "$old" && -n "$new" ]] || return 0
+    [[ -f "${CIPI_CONFIG}/apps.json" ]] || return 0
+    old_re=$(printf '%s' "$old" | sed 's/[][\.*^$|&/]/\\&/g')
+    new_esc=$(printf '%s' "$new" | sed 's/[&|\\]/\\&/g')
+    while IFS= read -r app; do
+        [[ -n "$app" ]] || continue
+        env="/home/${app}/shared/.env"
+        [[ -f "$env" ]] || continue
+        grep -qE "^REDIS_PASSWORD=[\"']?${old_re}[\"']?$" "$env" 2>/dev/null || continue
+        sed -i "s|^REDIS_PASSWORD=.*|REDIS_PASSWORD=${new_esc}|" "$env" && echo "$app"
+    done < <(vault_read apps.json 2>/dev/null | jq -r 'keys[]' 2>/dev/null || true)
+    return 0
+}
+
 reset_valkey_password() {
-    local new_pass
+    local new_pass old_pass
     new_pass=$(generate_password 40)
+    old_pass=$(vault_read server.json 2>/dev/null | jq -r '.valkey_password // .redis_password // empty' 2>/dev/null)
 
     # Update valkey.conf
     if grep -q "^requirepass" /etc/valkey/valkey.conf; then
@@ -117,10 +140,17 @@ reset_valkey_password() {
         "The Valkey password was regenerated.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         reset_valkey_password
 
+    local synced
+    synced=$(_reset_valkey_env_sync "$old_pass" "$new_pass" | paste -sd' ' -)
+
     echo ""
     echo -e "${GREEN}✓${NC} New Valkey password: ${CYAN}${new_pass}${NC}"
     echo -e "${DIM}Valkey has been restarted.${NC}"
-    echo -e "${YELLOW}Update REDIS_PASSWORD in your app .env files!${NC}"
+    if [[ -n "$synced" ]]; then
+        echo -e "${GREEN}✓${NC} REDIS_PASSWORD updated in shared/.env of: ${synced}"
+        echo -e "${DIM}An app with a cached config reads it after: cipi app artisan <app> optimize${NC}"
+    fi
+    echo -e "${YELLOW}Any other .env that holds the Valkey password has to be updated by hand.${NC}"
     echo -e "${YELLOW}${BOLD}⚠ SAVE THIS PASSWORD — shown only once${NC}"
     echo ""
 }

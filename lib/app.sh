@@ -386,8 +386,9 @@ BASH
     # 5. Config: .env (Laravel only)
     if [[ "$app_type" == "laravel" ]]; then
         step ".env..."
-        local db_env
+        local db_env redis_env
         db_env=$(db_laravel_env_block "$db_engine" "$app_user" "$app_user" "$db_pass")
+        redis_env=$(_app_redis_env_block)
         cat > "${home}/shared/.env" <<ENV
 APP_NAME="${app_user}"
 APP_ENV=production
@@ -403,13 +404,14 @@ ${db_env}
 BROADCAST_CONNECTION=log
 CACHE_STORE=database
 SESSION_DRIVER=database
-QUEUE_CONNECTION=database
+QUEUE_CONNECTION=database${redis_env}
 
 MAIL_MAILER=log
 
 CIPI_WEBHOOK_TOKEN=${webhook_token}
 CIPI_APP_USER=${app_user}
 CIPI_PHP_VERSION=${php_ver}
+CIPI_DEPLOY_BRANCH=${branch}
 ENV
         if [[ -n "$octane_server" ]]; then
             cat >> "${home}/shared/.env" <<ENV
@@ -420,7 +422,7 @@ ENV
         fi
         chown "${app_user}:${app_user}" "${home}/shared/.env"
         chmod 640 "${home}/shared/.env"
-        success ".env with DB + webhook"
+        success ".env with DB${redis_env:+, Valkey} + webhook"
     fi
 
     # 6. PHP-FPM pool (Laravel and custom) — skipped for Octane apps
@@ -675,17 +677,7 @@ SUDO
             echo -e "  ${DIM}Add a repo later: cipi app edit ${app_user} --repository=<SSH-URL>${NC}"
         fi
     elif [[ "$app_type" == "node" ]]; then
-        if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
-            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
-            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
-        else
-            echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
-            echo -e "  ${CYAN}${deploy_key}${NC}"
-            echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
-            echo ""
-            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}  ${DIM}(push events)${NC}"
-            echo -e "  ${BOLD}Secret${NC}      ${CYAN}${webhook_token}${NC}"
-        fi
+        _app_summary_git "$app_user" "$url_host" "$webhook_token" "$repository" "$deploy_key" "Secret"
         _app_summary_repo_access "$app_user" "$branch"
         echo ""
         echo -e "  ${BOLD}Next:${NC} cipi app env ${app_user}      ${DIM}(build and runtime variables)${NC}"
@@ -693,21 +685,7 @@ SUDO
         echo -e "        cipi ssl install ${app_user}"
         [[ "$NODE_OPT_MODE" == "ssr" ]] && echo -e "  ${DIM}Each deploy starts the new release beside the old one and switches only once it answers on ${NODE_OPT_HEALTH}.${NC}"
     elif [[ "$app_type" == "laravel" ]]; then
-        if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
-            echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
-            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
-        else
-            echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
-            echo -e "  ${CYAN}${deploy_key}${NC}"
-            echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
-            echo ""
-            echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
-            echo -e "  ${BOLD}Token${NC}       ${CYAN}${webhook_token}${NC}"
-            if [[ -z "${GIT_PROVIDER:-}" ]]; then
-                echo ""
-                echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
-            fi
-        fi
+        _app_summary_git "$app_user" "$url_host" "$webhook_token" "$repository" "$deploy_key" "Token"
         _app_summary_repo_access "$app_user" "$branch"
         echo ""
         if [[ -n "$octane_server" ]]; then
@@ -731,6 +709,57 @@ SUDO
     echo ""
     echo -e "  ${YELLOW}${BOLD}⚠ SAVE THESE CREDENTIALS — shown only once${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# REDIS_* lines for a new app's .env: the local Valkey, with the password Cipi
+# set at install (server.json). Cache, session and queue stay on the database
+# until the operator switches them; the credentials are there so that the
+# switch is one line, not a hunt for the password. Nothing when the server
+# has no Valkey password on record. Starts with a blank line: appended to the
+# QUEUE_CONNECTION line of the template.
+_app_redis_env_block() {
+    local pass
+    pass=$(vault_read server.json 2>/dev/null | jq -r '.valkey_password // .redis_password // empty' 2>/dev/null)
+    [[ -n "$pass" ]] || return 0
+    printf '\n\nREDIS_HOST=127.0.0.1\nREDIS_PASSWORD=%s\nREDIS_PORT=6379' "$pass"
+}
+
+# Git lines of the create summary: what the forge took, what it refused and
+# why, and what to do about it. Before 5.7.2 a refused webhook fell into the
+# "add the deploy key by hand" block, with no word about the webhook.
+# Usage: _app_summary_git <app> <url_host> <webhook_token> <repository> <deploy_key> <secret_label>
+_app_summary_git() {
+    local app="$1" url_host="$2" webhook_token="$3" repository="$4" deploy_key="$5" secret_label="$6"
+    if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" && -n "${GIT_WEBHOOK_ID:-}" ]]; then
+        echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} auto-configured ✓${NC}"
+        echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}"
+        return 0
+    fi
+    if [[ -n "${GIT_PROVIDER:-}" && -n "${GIT_DEPLOY_KEY_ID:-}" ]]; then
+        echo -e "  ${BOLD}Git${NC}         ${GREEN}${GIT_PROVIDER} deploy key ✓${NC}"
+    else
+        if [[ -n "${GIT_PROVIDER:-}" ]]; then
+            echo -e "  ${BOLD}Deploy Key${NC}  ${RED}not added on ${GIT_PROVIDER}${NC}${GIT_SETUP_KEY_ERROR:+ — ${GIT_SETUP_KEY_ERROR}}"
+            echo -e "              ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
+        else
+            echo -e "  ${BOLD}Deploy Key${NC}  ${YELLOW}add it to the repository before the first deploy — the deploy fails without it${NC}"
+        fi
+        echo -e "  ${CYAN}${deploy_key}${NC}"
+        echo -e "  ${DIM}$(_app_deploy_key_hint "$repository")${NC}"
+    fi
+    echo ""
+    if [[ -n "${GIT_PROVIDER:-}" ]] && ! _git_provider_webhooks "$GIT_PROVIDER"; then
+        echo -e "  ${BOLD}Webhook${NC}     ${DIM}${GIT_PROVIDER} has no HTTP deploy webhook — deploy with: cipi deploy ${app}${NC}"
+    elif [[ -n "${GIT_PROVIDER:-}" ]]; then
+        echo -e "  ${BOLD}Webhook${NC}     ${RED}not created on ${GIT_PROVIDER}${NC}${GIT_SETUP_HOOK_ERROR:+ — ${GIT_SETUP_HOOK_ERROR}}"
+        echo -e "              ${YELLOW}a push will not deploy until it exists${NC} ${DIM}— fix the token, then: cipi git refresh ${app}${NC}"
+        echo -e "              ${DIM}or add it by hand: https://${url_host}/cipi/webhook  (${secret_label}: ${webhook_token})${NC}"
+    else
+        echo -e "  ${BOLD}Webhook${NC}     ${CYAN}https://${url_host}/cipi/webhook${NC}  ${DIM}(push events)${NC}"
+        printf "  ${BOLD}%-11s${NC} ${CYAN}%s${NC}\n" "$secret_label" "$webhook_token"
+        echo ""
+        echo -e "  ${DIM}Tip: cipi git status — save a provider token to auto-configure next time${NC}"
+    fi
 }
 
 # Where the deploy key goes on the forge of this repository (summary hint).
@@ -1083,6 +1112,9 @@ app_edit() {
                 # shellcheck source=/dev/null
                 source "${CIPI_LIB}/node.sh"
                 _node_webhook_config "$app"
+            else
+                # The webhook of cipi/agent reads the branch from .env.
+                app_env_set_deploy_branch "$app" "${ARG_branch}"
             fi
             success "Branch → ${ARG_branch}"; changed=true; repo_changed=true
         fi
@@ -1971,8 +2003,14 @@ alias_list() {
 
 # ── WWW (canonical www / apex redirects) ──────────────────────
 # Sets WWW_PAIR_APEX and WWW_PAIR_HOST from a primary domain.
+# A wildcard primary ("*.example.com") takes the pair of its base:
+# example.com and www.example.com. Until 5.7.2 it was refused ("no www/apex
+# pair"), which left a multi-tenant app with no way to send example.com to
+# www.example.com. In nginx the wildcard itself serves www.example.com, and
+# the apex joins as an alias (_www_ensure_pair); the dedicated server block
+# of the redirect host wins over the wildcard, being an exact name.
 _www_resolve_pair() {
-    local primary="$1"
+    local primary="${1#\*.}"
     if [[ "$primary" == www.* ]]; then
         WWW_PAIR_HOST="$primary"
         WWW_PAIR_APEX="${primary#www.}"
@@ -1982,26 +2020,30 @@ _www_resolve_pair() {
     fi
 }
 
-# A wildcard primary ("*.example.com") has no apex/www pair: prefixing it gives
-# "www.*.example.com", which is not a hostname and which nginx would refuse.
-_www_reject_wildcard() {
-    local app="$1" primary
-    primary=$(app_get "$app" domain)
-    if domain_is_wildcard "$primary"; then
-        error "'${app}' is served on the wildcard domain '${primary}' — there is no www/apex pair to redirect"
-        return 1
+# The name of the pair the primary does not serve by itself: the apex for a
+# wildcard primary (the wildcard covers www), otherwise the other half.
+_www_pair_other() {
+    local primary="$1"
+    _www_resolve_pair "$primary"
+    if domain_is_wildcard "$primary" || [[ "$primary" == "$WWW_PAIR_HOST" ]]; then
+        echo "$WWW_PAIR_APEX"
+    else
+        echo "$WWW_PAIR_HOST"
     fi
-    return 0
 }
 
 # Ensure the apex/www counterpart of the primary is present as an alias.
+# Returns 0 when it added it (WWW_PAIR_ADDED holds the name), 1 when it was
+# already there.
+WWW_PAIR_ADDED=""
 _www_ensure_pair() {
     local app="$1" primary other
     primary=$(app_get "$app" domain)
-    _www_resolve_pair "$primary"
-    if [[ "$primary" == "$WWW_PAIR_HOST" ]]; then other="$WWW_PAIR_APEX"; else other="$WWW_PAIR_HOST"; fi
+    other=$(_www_pair_other "$primary")
+    WWW_PAIR_ADDED=""
     if _alias_ensure "$app" "$other"; then
         info "Added alias '${other}'"
+        WWW_PAIR_ADDED="$other"
         return 0
     fi
     return 1
@@ -2014,8 +2056,7 @@ www_add() {
 
     local primary other
     primary=$(app_get "$app" domain)
-    _www_resolve_pair "$primary"
-    if [[ "$primary" == "$WWW_PAIR_HOST" ]]; then other="$WWW_PAIR_APEX"; else other="$WWW_PAIR_HOST"; fi
+    other=$(_www_pair_other "$primary")
 
     if [[ -z "$other" || "$other" == "$primary" ]]; then
         error "Cannot derive www/apex pair from '${primary}'"; exit 1
@@ -2041,7 +2082,6 @@ www_force_to_root() {
     local app="${1:-}"
     [[ -z "$app" ]] && { error "Usage: cipi www force-to-root <app>"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
-    _www_reject_wildcard "$app" || exit 1
 
     _www_ensure_pair "$app" || true
     _www_resolve_pair "$(app_get "$app" domain)"
@@ -2055,13 +2095,14 @@ www_force_to_root() {
         "WWW canonical redirect enabled (www → apex).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         www_force_to_root
     success "WWW redirect: ${WWW_PAIR_HOST} → ${WWW_PAIR_APEX}"
+    [[ -n "$WWW_PAIR_ADDED" ]] && _alias_cert_hint "$app" "$WWW_PAIR_ADDED"
+    return 0
 }
 
 www_force_from_root() {
     local app="${1:-}"
     [[ -z "$app" ]] && { error "Usage: cipi www force-from-root <app>"; exit 1; }
     app_exists "$app" || { error "Not found"; exit 1; }
-    _www_reject_wildcard "$app" || exit 1
 
     _www_ensure_pair "$app" || true
     _www_resolve_pair "$(app_get "$app" domain)"
@@ -2075,6 +2116,8 @@ www_force_from_root() {
         "WWW canonical redirect enabled (apex → www).\n\nServer: $(hostname)\nApp: ${app}\nRedirect: ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         www_force_from_root
     success "WWW redirect: ${WWW_PAIR_APEX} → ${WWW_PAIR_HOST}"
+    [[ -n "$WWW_PAIR_ADDED" ]] && _alias_cert_hint "$app" "$WWW_PAIR_ADDED"
+    return 0
 }
 
 www_clear() {

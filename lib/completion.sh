@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update service app node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status disk version self-update service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -179,6 +179,9 @@ _cipi_complete() {
         deploy)
             if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps)"
             else sub="--snapshot --rollback --releases --log --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
+
+        use)
+            [[ $pos -eq 1 ]] && sub="$(_cipi_apps) --clear" ;;
 
         worker)
             case $pos in

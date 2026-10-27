@@ -444,6 +444,9 @@ php_admin_value[open_basedir] = /home/${app}/:$(dirname "$NODE_WEBHOOK_PHP")/:/t
 php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec
 php_admin_value[upload_max_filesize] = 2M
 php_admin_value[post_max_size] = 2M
+; The receiver reads a JSON body and nothing else: no multipart parsing, which
+; is the request path of CVE-2026-109618.
+php_admin_flag[file_uploads] = off
 php_admin_flag[log_errors] = on
 php_admin_value[error_log] = /home/${app}/logs/webhook-error.log
 $(fpm_pool_hardening "$v")

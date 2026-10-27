@@ -4,6 +4,59 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.7.2] — 2026-10-27
+
+Six reports from one user in the field, and the PHP advisory of 2026-10-21 taken one step further.
+
+### Fixed — `deploy.post` steps never ran on webhook deploys (`post-deploy summary:  (exit=127)`)
+
+`cipi-app-post-deploy` runs as the app user and sources `/opt/cipi/lib/yml.sh` for the `deploy.post` steps of `cipi.yml`. `setup.sh` and `cipi self-update` installed every lib `0700 root`, so the source failed, the runner's function did not exist, and each webhook deploy logged `post-deploy summary:  (exit=127)` followed by `post-deploy steps failed — see above` — with no step declared at all. `cipi deploy` from a shell or the panel runs as root and never showed it.
+
+- `yml.sh` is installed `0644` (the lib directories `0755`); migration 5.7.2 fixes servers already installed.
+- The runner now checks that it can read and load the lib before it starts, and says what is wrong in the deploy log (`post-deploy runner: cannot read … (mode 700)`), with exit 2 kept apart from a failed step.
+- `cipi-app-deploy` reads the post-deploy summary from the lines of this run only: the log is cumulative, and an older deploy's summary could stand in for a missing one.
+
+### Fixed — a refused GitHub deploy key said `HTTP 404: Not Found` and rotated the key
+
+GitHub answers 404, not 403, to a token that may not see or administer a repository. `cipi git refresh` took every refusal for "this key is already used on another repository", generated a new key, failed again with the same 404 and left the app with a key no repository knew. `cipi app create` swallowed the forge's answer altogether (`Could not add deploy key — add it manually`), and the panel showed nothing.
+
+- Every forge call that fails says what the code means and what to do: a GitHub 404 names the repository and the token permissions it needs (fine-grained: *Administration: Read and write* for deploy keys, *Webhooks: Read and write*; classic: `repo` and `admin:repo_hook`); 401 is a revoked token; the same for GitLab (`api` scope, Maintainer) and Bitbucket (*Repositories: Admin*).
+- `cipi git refresh` rotates the key only when the token can see the repository; otherwise it stops and says so.
+- The `cipi app create` summary carries the forge's answer, and when the deploy key is in but the webhook is not it says that a push will not deploy until `cipi git refresh <app>` (or the hand-added webhook) exists. A forge without HTTP webhooks (Origin, CodeCommit) is told apart from a refused one.
+
+### Fixed — `cipi www force-from-root|force-to-root` refused an app on a wildcard domain
+
+An app whose primary domain is `*.example.com` was refused (`there is no www/apex pair to redirect`), which left a multi-tenant app with no way to send `example.com` to `www.example.com`. The pair of a wildcard primary is the one of its base: the wildcard serves `www.example.com` in nginx, the apex joins as an alias, and the dedicated server block of the redirect host wins over the wildcard. `cipi.yml` (`app.www`) and `cipi yml generate` follow. When the redirect added the pair alias, the certificate hint is printed, as `cipi alias add` does.
+
+### Added — `cipi use <app>`: a default app for the per-app commands
+
+`cipi use shop` makes `shop` the app `cipi deploy`, `cipi app logs|env|artisan|edit`, `cipi yml plan|apply`, `cipi worker list`, `cipi ssl install`, `cipi www …`, `cipi alias …`, `cipi health …` and the other per-app commands act on when no app is given; they print `→ shop (default app — cipi use)` on stderr. `cipi use` shows it, `cipi use --clear` removes it; `CIPI_APP=<app>` does the same for one shell and wins over the file. It is filled in only where the app is a required argument today, so nothing that works changes meaning: `cipi git refresh|check` and `cipi scan` without an app still mean every app, and `cipi app delete|reset-password|reset-db-password|convert|clone` and `cipi db …` still want the name. The panel API runs as `www-data` and never gets a default. Tab-completion and `cipi help use` know it.
+
+### Added — `CIPI_DEPLOY_BRANCH` and `REDIS_*` in a new Laravel app's `.env`
+
+- `CIPI_DEPLOY_BRANCH=<branch>` is written at `cipi app create` and kept in step by `cipi app edit --branch` and `cipi sync import`: the webhook of cipi/agent deploys a push to that branch and answers "skipped" to every other one (before, every push deployed). Migration 5.7.2 adds the key to existing Laravel apps that lack it; a value already there is left alone.
+- `REDIS_HOST`, `REDIS_PASSWORD` and `REDIS_PORT` point at the local Valkey with the password Cipi set at install. Cache, session and queue stay on the database; switching one is now a one-line change instead of a hunt for the password. `cipi reset valkey-password` updates `REDIS_PASSWORD` in every app `.env` that still holds the previous password and names the apps it touched; a value set by hand is left alone.
+
+### Added — `cipi backup profile remove <name> --purge`
+
+Removing a profile kept its archives until a remaining profile's age-based retention took them, and with none they stayed for good. `--purge` deletes every run of the profile now, on every destination; on a terminal the question is asked after the removal is confirmed. `--purge` also works for a profile that is already gone, to clear what it left behind. Without it the message says how many runs stay and how to delete them.
+
+### Added — `cipi deploy <app> --releases` shows how long each deploy took
+
+A `TOOK` column, read from the end banner of the deploy log (`duration=54s`), next to the date and the commit of each release.
+
+### Security — PHP advisory mitigations in `fpm/conf.d/99-cipi.ini` and the Node webhook pool
+
+- `session.upload_progress.enabled = 0` and `fatal_error_backtraces = 0` (the 2026-10-21 advisory, CVE-2026-109618/109619) are written to each PHP version's `/etc/php/X.Y/fpm/conf.d/99-cipi.ini` by `cipi php install`, `setup.sh` and migration 5.7.2, so the stock `www` pool and any pool written by hand carry them too. Every Cipi pool had them as `php_admin_flag` since 5.6.3; the Octane ini is unchanged and now shares the generator.
+- The Node webhook pool sets `file_uploads = off`: the receiver reads a JSON body and nothing else, so the multipart request path of CVE-2026-109618 is closed there.
+- `cipi ini keys` lists the two hardening keys under *Not settable here* with the reason, instead of "Unknown or non-settable key".
+
+### Migration
+
+`lib/migrations/5.7.2.sh`: makes `yml.sh` readable by app users; appends the missing hardening lines to each installed version's `fpm/conf.d/99-cipi.ini` (matched by key, a hand-set value is kept); renders the Node webhook pools again with a backup in `/var/lib/cipi/fpm-pool-backup-5.7.2/` and a rollback on a refused `php-fpm -t`; adds `CIPI_DEPLOY_BRANCH` where it is missing; restarts the PHP-FPM versions whose ini or pools changed. `tests/verify-5.7.2.sh` runs the migration with stubs, the post-deploy runner against an unreadable and a readable lib, and the new helpers.
+
+---
+
 ## [5.7.1] — 2026-10-23
 
 ### Security — PHP hardening for Octane apps (CVE-2026-115560)

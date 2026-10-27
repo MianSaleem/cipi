@@ -197,6 +197,9 @@ _php_install() {
     local pkgs=""
     for e in $_PHP_EXT; do pkgs+=" php${v}-${e}"; done
     apt-get install -y -qq $pkgs
+    # The hardening lines (php_fpm_ini_hardening) reach every pool of this
+    # version, including the stock `www` pool below, which no Cipi vhost uses
+    # but which still answers on its socket.
     cat > "/etc/php/${v}/fpm/conf.d/99-cipi.ini" <<EOF
 memory_limit = 256M
 upload_max_filesize = 256M
@@ -204,6 +207,7 @@ post_max_size = 256M
 max_execution_time = 300
 max_input_time = 300
 expose_php = Off
+$(php_fpm_ini_hardening)
 EOF
     cat > "/etc/php/${v}/fpm/pool.d/www.conf" <<POOLEOF
 [www]

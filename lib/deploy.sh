@@ -629,6 +629,28 @@ _deploy_rollback() {
 # Release directories stay numeric (Deployer increments them, and rollback
 # relies on that ordering). The date and the deployed commit are shown here
 # instead, which is what the numbers alone failed to tell you.
+# 54 → "54s", 125 → "2m05s", 3725 → "1h02m".
+_deploy_fmt_secs() {
+    local s="${1:-}"
+    [[ "$s" =~ ^[0-9]+$ ]] || { printf '%s' "$s"; return 0; }
+    if (( s < 60 )); then printf '%ds' "$s"
+    elif (( s < 3600 )); then printf '%dm%02ds' $((s / 60)) $((s % 60))
+    else printf '%dh%02dm' $((s / 3600)) $(((s % 3600) / 60)); fi
+}
+
+# How long the deploy of release $2 took, from the end banner the deploy log
+# carries for it ("===== deploy OK  app=x release=N duration=54s exit=0").
+# The log is cumulative: the last banner of that release wins. Empty when
+# the log has none (a release deployed before 5.6.0, or a log rotated away).
+_deploy_release_took() {
+    local app="$1" rel="$2" lf secs
+    lf=$(deploy_log_file "$app")
+    [[ -f "$lf" ]] || return 0
+    secs=$(grep -oE "deploy OK  app=${app} release=${rel} duration=[0-9]+s" "$lf" 2>/dev/null | tail -1 | grep -oE '[0-9]+s$' || true)
+    [[ -n "$secs" ]] && _deploy_fmt_secs "${secs%s}"
+    return 0
+}
+
 _deploy_releases() {
     local app="$1"
     local home="/home/${app}"
@@ -637,8 +659,8 @@ _deploy_releases() {
     [[ -L "${home}/current" ]] && current=$(readlink -f "${home}/current" | xargs basename)
 
     echo -e "\n${BOLD}Releases for '${app}'${NC}"
-    printf "  ${BOLD}%-8s %-20s %-10s %s${NC}\n" "RELEASE" "DEPLOYED" "COMMIT" "SUBJECT"
-    local r when sha subject mark
+    printf "  ${BOLD}%-8s %-20s %-7s %-10s %s${NC}\n" "RELEASE" "DEPLOYED" "TOOK" "COMMIT" "SUBJECT"
+    local r when sha subject mark took
     while read -r r; do
         [[ -n "$r" ]] || continue
         when=$(stat -c '%y' "${home}/releases/${r}" 2>/dev/null | cut -d. -f1)
@@ -647,8 +669,9 @@ _deploy_releases() {
             sha=$(git -C "${home}/releases/${r}" log -1 --format=%h 2>/dev/null || true)
             subject=$(git -C "${home}/releases/${r}" log -1 --format=%s 2>/dev/null | cut -c1-46 || true)
         fi
+        took=$(_deploy_release_took "$app" "$r")
         mark=""; [[ "$r" == "$current" ]] && mark=" ${GREEN}← current${NC}"
-        printf "  ${CYAN}%-8s${NC} %-20s %-10s %s%b\n" "$r" "${when:-—}" "${sha:-—}" "${subject:-—}" "$mark"
+        printf "  ${CYAN}%-8s${NC} %-20s %-7s %-10s %s%b\n" "$r" "${when:-—}" "${took:-—}" "${sha:-—}" "${subject:-—}" "$mark"
     done < <(ls -1t "${home}/releases" 2>/dev/null)
     echo ""
     echo -e "  ${DIM}Rollback to the previous release: cipi deploy ${app} --rollback${NC}"

@@ -82,6 +82,8 @@ error_log|Cipi points this at the app's own log directory
 session.save_path|Cipi keeps sessions inside the app home
 sys_temp_dir|Confined by open_basedir
 upload_tmp_dir|Confined by open_basedir
+session.upload_progress.enabled|Off in every pool since 5.6.3 (PHP advisory of 2026-10-21, CVE-2026-109619)
+fatal_error_backtraces|Off in every pool since 5.6.3 (PHP advisory of 2026-10-21, CVE-2026-109618)
 EOF
 }
 

@@ -38,6 +38,7 @@ SUP_DIR="${TMP}/etc/supervisor/conf.d"
 mkdir -p "$SUP_DIR"
 {
     grep '^OCTANE_INI_DIR=' "${LIB}/common.sh"
+    extract common.sh php_fpm_ini_hardening
     extract common.sh octane_php_ini_ensure
     extract common.sh _supervisor_remove_program
     extract common.sh _create_supervisor_octane

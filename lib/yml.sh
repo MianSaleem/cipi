@@ -1745,13 +1745,13 @@ _yml_build_plan() {
     cur_www=$(app_get "$app" www_redirect); [[ "$cur_www" == "to-root" || "$cur_www" == "from-root" ]] || cur_www="none"
     www_primary=$(app_get "$app" domain)
     _www_resolve_pair "$www_primary"
-    local www_other="$WWW_PAIR_HOST"; [[ "$www_primary" == "$WWW_PAIR_HOST" ]] && www_other="$WWW_PAIR_APEX"
+    # The apex for a wildcard primary (the wildcard serves www), otherwise
+    # the other half of the pair.
+    local www_other; www_other=$(_www_pair_other "$www_primary")
     local aliases_declared=false
     echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("aliases"))' &>/dev/null && aliases_declared=true
     if [[ -n "$want_www" && "$want_www" != "$cur_www" ]]; then
-        if [[ "$want_www" != "none" ]] && domain_is_wildcard "$www_primary"; then
-            _YML_BLOCKERS+=("app.www is '${want_www}', but '${app}' is served on the wildcard domain '${www_primary}' — there is no www/apex pair")
-        elif [[ "$want_www" != "none" && "$aliases_declared" == true ]] \
+        if [[ "$want_www" != "none" && "$aliases_declared" == true ]] \
              && ! echo "$_YML_DATA" | jq -e --arg d "$www_other" '.app.aliases | index($d) != null' &>/dev/null; then
             _YML_BLOCKERS+=("app.www is '${want_www}', which needs '${www_other}' — add it to app.aliases")
         else
@@ -3606,11 +3606,12 @@ _yml_generate() {
         [[ "$www_mode" == "to-root" || "$www_mode" == "from-root" ]] || www_mode="none"
         echo ""
         if [[ "$domain" == \*.* ]]; then
-            echo "  # www: none           # wildcard primary — no www/apex pair to redirect"
+            echo "  # to-root (www → apex), from-root (apex → www) or none. For a wildcard"
+            echo "  # primary the pair is the one of its base: ${domain#\*.} and www.${domain#\*.}."
         else
             echo "  # to-root (www → apex), from-root (apex → www) or none."
-            echo "  www: ${www_mode}"
         fi
+        echo "  www: ${www_mode}"
 
         # ── HTTP basic auth — user names only, never the hashes on this server
         local ba_users

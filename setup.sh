@@ -801,7 +801,10 @@ install_php() {
         done
         _cipi_apt_install -y -qq $PACKAGES
 
-        # Cipi defaults
+        # Cipi defaults. The last two lines are the PHP advisory mitigations of
+        # 2026-10-21 (CVE-2026-109618/109619), the same lines every Cipi pool
+        # carries (lib/common.sh php_fpm_ini_hardening): here they also cover
+        # the stock `www` pool. PHP ignores fatal_error_backtraces before 8.5.
         cat > "/etc/php/${VER}/fpm/conf.d/99-cipi.ini" <<INIEOF
 memory_limit = 256M
 upload_max_filesize = 256M
@@ -809,6 +812,8 @@ post_max_size = 256M
 max_execution_time = 300
 max_input_time = 300
 expose_php = Off
+session.upload_progress.enabled = 0
+fatal_error_backtraces = 0
 INIEOF
 
         # Replace default www pool with a minimal placeholder so FPM can start
@@ -955,7 +960,11 @@ install_cipi() {
 
     # Lib scripts
     cp cipi-install/lib/*.sh /opt/cipi/lib/
+    chmod 755 /opt/cipi /opt/cipi/lib
     chmod 700 /opt/cipi/lib/*.sh
+    # cipi-app-post-deploy runs as the app user and sources yml.sh for the
+    # deploy.post steps of cipi.yml: it has to be readable by every app user.
+    chmod 644 /opt/cipi/lib/yml.sh
     cp cipi-install/lib/gui-reset-admin.php /opt/cipi/lib/ 2>/dev/null || true
     cp cipi-install/lib/cipi-webhook.php /opt/cipi/lib/ 2>/dev/null || true
     chmod 644 /opt/cipi/lib/gui-reset-admin.php 2>/dev/null || true

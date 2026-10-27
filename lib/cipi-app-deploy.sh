@@ -168,11 +168,18 @@ if sudo -n -l /usr/local/bin/cipi yml apply "$APP" --yes --auto >/dev/null 2>&1;
     esac
 fi
 
-# Allowlisted post-deploy steps from cipi.yml (npm run, artisan, …).
+# Allowlisted post-deploy steps from cipi.yml (npm run, artisan, …). The
+# summary is read back from the lines this run appended: older deploys share
+# the file, and their summary must not stand in for this one.
+POST_MARK=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+POST_RC=0
 if [[ -x /usr/local/bin/cipi-app-post-deploy ]]; then
-    /usr/local/bin/cipi-app-post-deploy "$APP" "$PHP_VER" "$LOG" || {
+    /usr/local/bin/cipi-app-post-deploy "$APP" "$PHP_VER" "$LOG" || POST_RC=$?
+    if [[ $POST_RC -eq 2 ]]; then
+        printf '[%(%Y-%m-%d %H:%M:%S)T] post-deploy steps not run — the runner could not start, see above\n' -1 >> "$LOG" 2>/dev/null || true
+    elif [[ $POST_RC -ne 0 ]]; then
         printf '[%(%Y-%m-%d %H:%M:%S)T] post-deploy steps failed — see above\n' -1 >> "$LOG" 2>/dev/null || true
-    }
+    fi
 fi
 
 # Did the release that just went live actually survive? An automatic deploy has
@@ -195,10 +202,9 @@ esac
 
 # Sent last, so "deploy succeeded" can say whether the app actually answers.
 # Announcing success while the site returns 500 would be worse than silence.
-POST_LINE="none declared"
-if grep -q '===== post-deploy steps' "$LOG" 2>/dev/null; then
-    POST_LINE=$(grep 'post-deploy summary:' "$LOG" 2>/dev/null | tail -1 | sed 's/.*post-deploy summary: //; s/ (exit=.*//')
-    [[ -z "$POST_LINE" ]] && POST_LINE="see deploy log"
+POST_LINE=$(tail -n +"$((POST_MARK + 1))" "$LOG" 2>/dev/null | grep 'post-deploy summary:' | tail -1 | sed 's/.*post-deploy summary: //; s/ (exit=.*//')
+if [[ -z "$POST_LINE" ]]; then
+    if [[ $POST_RC -ne 0 ]]; then POST_LINE="see deploy log"; else POST_LINE="none declared"; fi
 fi
 
 sudo /usr/local/bin/cipi-app-notify "$APP" deploy-ok 0 "$LOG" \

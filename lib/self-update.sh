@@ -87,6 +87,10 @@ selfupdate_command() {
     cp -r /opt/cipi "/opt/cipi.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null||true
     cp "${tmp}/cipi" /usr/local/bin/cipi; chmod 700 /usr/local/bin/cipi
     cp "${tmp}"/lib/*.sh /opt/cipi/lib/; chmod 700 /opt/cipi/lib/*.sh
+    # cipi-app-post-deploy (app user) sources yml.sh for the deploy.post steps
+    # of cipi.yml. With the 0700 above the source failed and the runner died
+    # with "command not found" (exit 127) on every webhook deploy.
+    chmod 755 /opt/cipi /opt/cipi/lib; chmod 644 /opt/cipi/lib/yml.sh
     cp "${tmp}/lib/gui-reset-admin.php" /opt/cipi/lib/ 2>/dev/null || true
     cp "${tmp}/lib/cipi-webhook.php" /opt/cipi/lib/ 2>/dev/null || true
     chmod 644 /opt/cipi/lib/gui-reset-admin.php 2>/dev/null || true

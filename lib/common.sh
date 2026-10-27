@@ -432,6 +432,16 @@ fpm_pool_hardening() {
     fi
 }
 
+# The same two settings as php.ini lines. Written to every PHP-FPM
+# /etc/php/X.Y/fpm/conf.d/99-cipi.ini (cipi php install, setup.sh,
+# migration 5.7.2) so that the stock `www` pool and any pool written by hand
+# carry them too, and to the Octane ini below. PHP ignores a key it does not
+# know, so fatal_error_backtraces is written whatever the version.
+php_fpm_ini_hardening() {
+    echo "session.upload_progress.enabled = 0"
+    echo "fatal_error_backtraces = 0"
+}
+
 # The same settings for Octane apps. FrankenPHP runs the PHP built into its
 # own binary, so pool lines never reach it: each Octane program sets
 # PHP_INI_SCAN_DIR=:${OCTANE_INI_DIR} (_create_supervisor_octane). The leading
@@ -446,13 +456,30 @@ octane_php_ini_ensure() {
     local f="${OCTANE_INI_DIR}/99-cipi-hardening.ini" tmp
     mkdir -p "$OCTANE_INI_DIR" && chmod 755 "$OCTANE_INI_DIR" || return 1
     tmp=$(mktemp "${OCTANE_INI_DIR}/.hardening.XXXXXX") || return 1
-    cat > "$tmp" <<'EOF'
-; Written by Cipi; rewritten on update. Loaded by every Octane (FrankenPHP)
-; app through PHP_INI_SCAN_DIR in its Supervisor program.
-session.upload_progress.enabled = 0
-fatal_error_backtraces = 0
-EOF
+    {
+        echo "; Written by Cipi; rewritten on update. Loaded by every Octane (FrankenPHP)"
+        echo "; app through PHP_INI_SCAN_DIR in its Supervisor program."
+        php_fpm_ini_hardening
+    } > "$tmp"
     chmod 644 "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+# CIPI_DEPLOY_BRANCH in a Laravel app's shared/.env. The webhook of cipi/agent
+# deploys a push to that branch and answers "skipped" to every other one;
+# without the key every push deployed. Written at create, kept in step by
+# `cipi app edit --branch` and `cipi sync import`. With $3 = add, a key that
+# is already there is left alone (migration 5.7.2 fills the gap on existing
+# apps without touching a value someone set by hand).
+app_env_set_deploy_branch() {
+    local app="${1:-}" branch="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env" safe
+    [[ -n "$app" && -n "$branch" && -f "$env" ]] || return 0
+    if grep -q '^CIPI_DEPLOY_BRANCH=' "$env" 2>/dev/null; then
+        [[ "$mode" == "add" ]] && return 0
+        safe=$(printf '%s' "$branch" | sed 's/[&|\\]/\\&/g')
+        sed -i "s|^CIPI_DEPLOY_BRANCH=.*|CIPI_DEPLOY_BRANCH=${safe}|" "$env"
+    else
+        printf 'CIPI_DEPLOY_BRANCH=%s\n' "$branch" >> "$env"
+    fi
 }
 
 # True if a systemd unit file exists.
