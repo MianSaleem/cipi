@@ -649,6 +649,8 @@ BASH
     if [[ "$(app_get "$app" runtime)" != "node" ]]; then
         app_env_set_deploy_branch "$app" "$branch"
     fi
+    # The post-deploy runner reads the environment label from .env (5.8.0).
+    app_env_set_environment "$app" "$(app_env_label "$app")" || true
 
     # 11. PHP-FPM (skipped for Octane apps)
     local sync_octane sync_octane_port
@@ -874,6 +876,8 @@ _sync_update_app() {
     if [[ "$(app_get "$app" runtime)" != "node" ]]; then
         app_env_set_deploy_branch "$app" "$branch"
     fi
+    # The post-deploy runner reads the environment label from .env (5.8.0).
+    app_env_set_environment "$app" "$(app_env_label "$app")" || true
 
     # 7. Regenerate nginx vhost (picks up alias changes / Octane proxy)
     step "Nginx..."

@@ -232,7 +232,7 @@ grep -q '_app_reverb_enable "$app"' "${LIB}/yml.sh" && pass "apply calls _app_re
 grep -q 'Reverb is Laravel only' "${LIB}/yml.sh" && pass "custom apps are blocked from workers.reverb" || fail "no blocker for custom apps"
 
 # ── 8. Cloning a Reverb app ────────────────────────────────────
-grep -q 'APP_KEY|APP_URL|DB_\*|DATABASE_URL|CIPI_\*|OCTANE_\*|REVERB_\*|VITE_REVERB_\*' "${LIB}/app.sh" \
+grep -q 'APP_KEY|APP_ENV|APP_URL|DB_\*|DATABASE_URL|CIPI_\*|OCTANE_\*|REVERB_\*|VITE_REVERB_\*' "${LIB}/app.sh" \
     && pass "clone does not copy the source's Reverb credentials" \
     || fail "clone still copies REVERB_* into the new .env"
 grep -q '_app_reverb_enable "\$name"' "${LIB}/app.sh" \

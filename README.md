@@ -215,6 +215,16 @@ only, never values), its scheduled commands (`crons`),
 its backup strategy, and **post-deploy steps** (`deploy.post`).
 `cipi yml plan` shows exactly what would change and `cipi yml apply` applies it.
 
+**One repository, several apps.** Every app has an environment label
+(`cipi app create --env=staging`, default `production`; `cipi app edit --env`
+changes it, `cipi app clone --env=staging` names the copy) and reads
+`cipi-<env>.yml` before `cipi.yml`. A staging app and a production app
+deployed from the same repository each find their own file; a `cipi-<env>.yml`
+that is invalid is an error, never a fall back on `cipi.yml`. The label goes
+into `.env` as `APP_ENV` and `CIPI_ENV`. `deploy.branch` says which git branch
+the app deploys, so the pair is typically `cipi-staging.yml` with
+`branch: develop` and `cipi.yml` with `branch: main`.
+
 Server reconciliation (aliases, PHP, workers, databases, …) is **opt-in**:
 `cipi yml auto <app> on` makes every successful deploy run `cipi yml apply`
 (from `cipi deploy`, the panel or the Git webhook). A release without the file is a no-op.
@@ -259,6 +269,7 @@ crons:
   - every: 30m                 # same allowlisted runners as deploy.post
     run: artisan queue:prune-batches
 deploy:
+  branch: main                 # the git branch to deploy (cipi app edit --branch)
   keep_releases: 3             # cipi app deploy-config, from the repository
   migrate: false
   predeploy_snapshot: true     # DB snapshot before each deploy
@@ -266,7 +277,7 @@ deploy:
 ```
 
 ```bash
-cipi yml generate myapp --save       # writes /home/myapp/cipi.yml
+cipi yml generate myapp --save       # writes /home/myapp/cipi.yml (cipi-<env>.yml for a non-production app)
 cipi yml generate myapp > cipi.yml   # or print it
 cipi yml example myapp > cipi.yml    # or a commented template
 cipi yml plan myapp                  # server diff + "After deploy" steps
@@ -382,7 +393,7 @@ Native GitHub, GitLab, [Bitbucket](https://bitbucket.org), [Azure DevOps](https:
 
 **Laravel** (default) — zero-downtime deploy with releases, shared storage, workers, scheduler, webhook; add **`--octane`** for FrankenPHP. **`--custom`** — for simple sites (e.g. WordPress, static+PHP): classic deploy into `htdocs` (no current/shared), choose docroot only (e.g. `/`, `www`, `dist`). Nginx: `index index.html index.php`, `try_files $uri $uri/ /index.php?$args`, `error_page 404 /404.html`. No DB, no .env, no cron, no workers, no webhook — just Nginx, PHP-FPM, and deploy key.
 
-Clone an app for staging with **`cipi app clone <src> --domain=…`**.
+Clone an app for staging with **`cipi app clone <src> --domain=… --env=staging`**: the clone gets its own environment label, so it reads `cipi-staging.yml` from the same repository.
 
 ### 🌐 Aliases, www & SSL
 

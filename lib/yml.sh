@@ -5,9 +5,15 @@
 # An app can carry a `cipi.yml` in its repository describing the state it
 # expects on the server: domain aliases, the www redirect, HTTP basic auth,
 # redirects and prefix proxies, search, PHP version and settings, its extra
-# databases, its queue workers and its backup strategy. `cipi yml apply`
-# reconciles the server with that file, so the configuration travels with the
-# code instead of living only in someone's shell history.
+# databases, its queue workers, the branch it deploys and its backup strategy.
+# `cipi yml apply` reconciles the server with that file, so the configuration
+# travels with the code instead of living only in someone's shell history.
+#
+# One repository, several apps: each app has an environment label (`cipi app
+# create --env`, production by default) and reads `cipi-<env>.yml` before
+# `cipi.yml`, so a staging app and a production app deployed from the same
+# repository each find their own file. The server picks the file; the file
+# never picks the app.
 #
 # The file arrives over git, which means anyone who can commit controls it.
 # That shapes every design decision here:
@@ -44,18 +50,52 @@ yml_command() {
     esac
 }
 
-# Where the file is looked for, in order: the live release, a custom app's
-# htdocs/ (that tree *is* the document root), then shared/.
+# The app's environment label (cipi app create --env; production when unset).
+# Root reads apps.json. The post-deploy runner runs as the app user, who
+# cannot, and reads CIPI_ENV from the app's shared/.env instead — the same
+# value, kept in step by create, edit, clone, sync and migration 5.8.0. A
+# label that is not a plain lowercase word is ignored, never used as a path.
+_yml_env_label() {
+    local app="$1" e=""
+    if [[ "$(id -u)" -eq 0 ]] && declare -f app_get >/dev/null 2>&1; then
+        e=$(app_get "$app" env 2>/dev/null || true)
+    else
+        e=$(sed -n 's/^CIPI_ENV=//p' "/home/${app}/shared/.env" 2>/dev/null | head -1 | tr -d "\"' \r")
+    fi
+    [[ "$e" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] && echo "$e" || echo production
+}
+
+# The file names read in one directory, in order: the environment's own file
+# first (cipi-<env>.yml, cipi-<env>.yaml), then the plain one. $1 = env label.
+_yml_names_for_env() {
+    printf 'cipi-%s.yml\ncipi-%s.yaml\ncipi.yml\ncipi.yaml\n' "$1" "$1"
+}
+
+# Every path looked at, in order: the live release, a custom app's htdocs/
+# (that tree *is* the document root), then shared/ — the environment's file
+# before the plain one in each.
+_yml_candidates() {
+    local app="$1" env dir name
+    env=$(_yml_env_label "$app")
+    for dir in current htdocs shared; do
+        while IFS= read -r name; do
+            echo "/home/${app}/${dir}/${name}"
+        done < <(_yml_names_for_env "$env")
+    done
+}
+
 _yml_find_file() {
     local app="$1" f
-    for f in "/home/${app}/current/cipi.yml" \
-             "/home/${app}/current/cipi.yaml" \
-             "/home/${app}/htdocs/cipi.yml" \
-             "/home/${app}/htdocs/cipi.yaml" \
-             "/home/${app}/shared/cipi.yml"; do
+    while IFS= read -r f; do
         [[ -f "$f" ]] && { echo "$f"; return 0; }
-    done
+    done < <(_yml_candidates "$app")
     return 1
+}
+
+# The name to commit for a label: production keeps the plain cipi.yml, any
+# other environment gets its own file, read before cipi.yml.
+_yml_default_name() {
+    [[ "${1:-production}" == "production" ]] && echo "cipi.yml" || echo "cipi-${1}.yml"
 }
 
 # Parse + validate, printing the validator's JSON result on stdout.
@@ -172,6 +212,8 @@ COMPOSER_FORBIDDEN = frozenset({"shell", "browse", "fund"})
 # limits). The bounds mirror the CLI; a value outside them is refused here
 # rather than clamped, because nobody is watching an automatic apply.
 KEEP_RELEASES_MIN, KEEP_RELEASES_MAX = 1, 20
+# deploy.branch: the same rule as `cipi app edit --branch` (validate_git_branch).
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,190}$")
 MAX_EXTRA_ARTISAN = 20
 MEMORY_LIMIT_RE = re.compile(r"^[0-9]{1,5}[MmGg]?$")
 LIMIT_BOUNDS = {"fpm_max_children": (1, 50), "octane_workers": (1, 16), "worker_procs": (1, 20)}
@@ -869,8 +911,21 @@ class Validator:
         self.unknown_keys(m, {"post", "post_on_failure", "keep_releases", "migrate",
                               "optimize", "storage_link", "queue_restart",
                               "horizon_terminate", "extra_artisan", "predeploy_snapshot",
-                              "snapshot", "node_build"}, "deploy")
+                              "snapshot", "node_build", "branch"}, "deploy")
         out = {"post_on_failure": "warn", "post": []}
+
+        # The git branch this app deploys (cipi app edit --branch). Applied
+        # after the deploy that carries it, so it takes effect from the next
+        # one: the usual pattern is cipi-staging.yml with branch develop and
+        # cipi.yml with branch main. Same characters as the CLI accepts, and
+        # never '..', which git itself refuses.
+        if "branch" in m:
+            b = self.as_str(m["branch"], "deploy.branch")
+            if b is not None:
+                if not BRANCH_RE.match(b) or ".." in b:
+                    self.err("deploy.branch", "a git branch name: letters, digits, '.', '_', '/' and '-' (max 191 chars), never '..'")
+                else:
+                    out["branch"] = b
 
         if "post_on_failure" in m:
             s = self.as_str(m["post_on_failure"], "deploy.post_on_failure")
@@ -1668,15 +1723,17 @@ _yml_resolve() {
     _YML_APP="$app"
     if [[ -z "$_YML_FILE" ]]; then
         _YML_FILE=$(_yml_find_file "$app") || {
-            error "No cipi.yml found for '${app}'."
-            echo "  Looked in: /home/${app}/current/cipi.yml, current/cipi.yaml, htdocs/cipi.yml, shared/cipi.yml"
+            local yenv yname
+            yenv=$(_yml_env_label "$app"); yname=$(_yml_default_name "$yenv")
+            error "No cipi.yml found for '${app}' (environment: ${yenv})."
+            echo "  Looked in /home/${app}/current, htdocs and shared for: $(_yml_names_for_env "$yenv" | paste -sd, - | sed 's/,/, /g')"
             echo ""
             echo "  Start from what this server already has:"
             echo "    cipi yml generate ${app} --save"
-            echo "    # writes /home/${app}/cipi.yml — commit that file at the repo root"
-            echo "  Or print it:  cipi yml generate ${app} > cipi.yml"
+            echo "    # writes /home/${app}/${yname} — commit that file at the repo root"
+            echo "  Or print it:  cipi yml generate ${app} > ${yname}"
             echo "  Or a blank template in this app's namespace:"
-            echo "    cipi yml example ${app} > cipi.yml"
+            echo "    cipi yml example ${app} > ${yname}"
             echo "  Then commit it to the repository and deploy."
             exit 1
         }
@@ -1986,6 +2043,20 @@ _yml_build_plan() {
             fi
         elif [[ "$want_search" == "false" && "$cur_search" == "true" ]]; then
             _YML_ACTIONS+=("search|off|disable search (indexes ${app}-* are kept)")
+        fi
+    fi
+
+    # ── deploy branch (cipi app edit --branch): which branch the app deploys,
+    # from the next deploy on. Any app with a repository, custom ones included;
+    # an SFTP-only app has nothing to point at a branch.
+    if echo "$_YML_DATA" | jq -e '.deploy | has("branch")' &>/dev/null; then
+        local br_want br_cur
+        br_want=$(echo "$_YML_DATA" | jq -r '.deploy.branch')
+        br_cur=$(app_get "$app" branch)
+        if [[ -z "$(app_get "$app" repository)" ]]; then
+            _YML_BLOCKERS+=("deploy.branch is declared, but '${app}' has no git repository (SFTP only) — cipi app edit ${app} --repository=<SSH-URL>")
+        elif [[ "$br_want" != "$br_cur" ]]; then
+            _YML_ACTIONS+=("deploy-branch|${br_want}|deploy branch: ${br_cur:-none} → ${br_want} (from the next deploy)")
         fi
     fi
 
@@ -2359,7 +2430,9 @@ _yml_node_sync_cmd() {
     fi
 
     local f="" c
-    for c in "${release}/cipi.yml" "${release}/cipi.yaml"; do [[ -f "$c" ]] && { f="$c"; break; }; done
+    while IFS= read -r c; do
+        [[ -f "${release}/${c}" ]] && { f="${release}/${c}"; break; }
+    done < <(_yml_names_for_env "$(_yml_env_label "$app")")
     [[ -n "$f" ]] || return 0
     local result; result=$(_yml_parse "$f" "$app") || true
     if [[ "$(jq -r '.ok' <<< "$result" 2>/dev/null)" != "true" ]]; then
@@ -2636,11 +2709,11 @@ _yml_plan_json() {
         fi
     fi
 
-    jq -nc --arg app "$app" --arg file "$_YML_FILE" --argjson auto "$auto" \
+    jq -nc --arg app "$app" --arg file "$_YML_FILE" --arg env "$(_yml_env_label "$app")" --argjson auto "$auto" \
         --argjson valid "$valid" --argjson in_sync "$in_sync" \
         --argjson errors "$errors" --argjson warnings "$warnings" \
         --argjson changes "$changes" --argjson blockers "$blockers" --argjson notes "$notes" \
-        '{app: $app, file: (if $file == "" then null else $file end), auto: $auto,
+        '{app: $app, env: $env, file: (if $file == "" then null else $file end), auto: $auto,
           valid: $valid, in_sync: $in_sync, errors: $errors, warnings: $warnings,
           changes: $changes, blockers: $blockers, notes: $notes}'
 }
@@ -2970,6 +3043,15 @@ _yml_apply_action() {
             step "drop ${pname} from the backup list"
             app_set_json "$app" backup_profiles "$(vault_read apps.json \
                 | jq -c --arg a "$app" --arg p "$pname" '(.[$a].backup_profiles // []) - [$p]')"
+            ;;
+        deploy-branch)
+            # The validator already refused anything validate_git_branch would;
+            # checked again here because this is the step that writes.
+            local nb_branch="${rest%%|*}"
+            validate_git_branch "$nb_branch" || { error "  invalid branch name '${nb_branch}'"; return 1; }
+            step "deploy branch → ${nb_branch}"
+            app_branch_set "$app" "$nb_branch"
+            log_action "BRANCH UPDATED (cipi.yml): ${app} → ${nb_branch}"
             ;;
         deploy-cfg)
             local pairs="${rest%%|*}" pair dk dv
@@ -3398,13 +3480,15 @@ _yml_auto_cmd() {
             local f
             if [[ "${ARG_json:-}" == "true" ]]; then
                 f=$(_yml_find_file "$app") || f=""
-                jq -nc --arg app "$app" --arg file "$f" \
+                jq -nc --arg app "$app" --arg file "$f" --arg env "$(_yml_env_label "$app")" \
                     --argjson auto "$([[ "$(app_get "$app" yml_auto)" == "true" ]] && echo true || echo false)" \
                     --argjson rule "$([[ -f "$sudoers" ]] && echo true || echo false)" \
-                    '{app: $app, auto: $auto, sudoers: $rule, file: (if $file == "" then null else $file end)}'
+                    '{app: $app, env: $env, auto: $auto, sudoers: $rule, file: (if $file == "" then null else $file end)}'
                 return 0
             fi
+            local yenv; yenv=$(_yml_env_label "$app")
             echo -e "\n${BOLD}cipi.yml for '${app}'${NC}"
+            printf "  %-16s %s ${DIM}%s${NC}\n" "Environment" "$yenv" "— reads cipi-${yenv}.yml first, then cipi.yml (cipi app edit ${app} --env=…)"
             if f=$(_yml_find_file "$app"); then
                 printf "  %-16s %s\n" "File" "$f"
             else
@@ -3519,23 +3603,28 @@ _yml_generate() {
     _yml_source_libs
 
     local out; out=$(mktemp)
-    local domain php custom
+    local domain php custom gen_env gen_name
     domain=$(app_get "$app" domain)
     php=$(app_get "$app" php)
     custom=$(app_get "$app" custom)
+    gen_env=$(_yml_env_label "$app")
+    gen_name=$(_yml_default_name "$gen_env")
 
     {
-        echo "# cipi.yml for '${app}' (${domain}) — generated on $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# ${gen_name} for '${app}' (${domain}) — generated on $(date '+%Y-%m-%d %H:%M:%S')"
         echo "# by: cipi yml generate ${app}"
         echo "#"
         echo "# This command prints the file. To write a copy on the server:"
-        echo "#     cipi yml generate ${app} --save          # /home/${app}/cipi.yml"
+        echo "#     cipi yml generate ${app} --save          # /home/${app}/${gen_name}"
         echo "#     cipi yml generate ${app} --save=PATH"
         echo "# Apply reads the copy committed in the repository, not the file --save writes."
         echo "#"
         echo "# This is the app's configuration as it stands on $(hostname) right now."
-        echo "# Commit it at the root of the repository, then check it back with:"
+        echo "# Commit it at the root of the repository as ${gen_name}, then check it back with:"
         echo "#     cipi yml plan ${app}      (should report nothing to do)"
+        echo "#"
+        echo "# Environment: ${gen_env}. This app reads cipi-${gen_env}.yml before cipi.yml, so one"
+        echo "# repository can carry a file per environment (cipi app edit ${app} --env=…)."
         echo "#"
         echo "# Not covered here, on purpose: the primary domain, the app's own"
         echo "# database, SSL certificates and anything else that is not safe to"
@@ -3829,7 +3918,9 @@ _yml_generate() {
             fi
         fi
 
-        # ── deploy recipe options (cipi app deploy-config) + post-deploy steps
+        # ── deploy branch, recipe options (cipi app deploy-config) + post-deploy steps
+        local gen_branch; gen_branch=$(app_get "$app" branch)
+        [[ -n "$(app_get "$app" repository)" ]] || gen_branch=""
         echo ""
         if [[ "$custom" != "true" ]]; then
             local is_node_rt=false
@@ -3837,6 +3928,9 @@ _yml_generate() {
             echo "# Deploy recipe options — the names and values of: cipi app deploy-config ${app}"
             echo "# Only declared keys are reconciled, and they apply from the next deploy."
             echo "deploy:"
+            if [[ -n "$gen_branch" ]]; then
+                echo "  branch: $(_yml_q "$gen_branch")   # the git branch this app deploys (cipi app edit --branch)"
+            fi
             echo "  keep_releases: $(_deploy_cfg_keep_releases "$app")"
             if [[ "$is_node_rt" != true ]]; then
                 echo "  migrate: $(_deploy_cfg_bool "$app" deploy_migrate true)"
@@ -3868,6 +3962,14 @@ _yml_generate() {
             echo "  # post:"
             echo "  #   - artisan cache:clear"
             echo "  #   - artisan db:seed --class=ReferenceDataSeeder --force"
+        elif [[ -n "$gen_branch" ]]; then
+            echo "# The git branch this app deploys (cipi app edit --branch), applied from"
+            echo "# the next deploy. A custom app has no deploy recipe, so post-deploy"
+            echo "# commands are also where its asset build goes:"
+            echo "deploy:"
+            echo "  branch: $(_yml_q "$gen_branch")"
+            echo "  # post:"
+            echo "  #   - npm run build"
         else
             echo "# Post-deploy commands (run after every successful deploy). A custom app"
             echo "# has no deploy recipe, so this is also where its asset build goes."
@@ -4005,7 +4107,7 @@ _yml_generate() {
 # that was committed into the repository.
 _yml_generate_save() {
     local app="$1" src="$2" dest="${ARG_save}" dir tmp
-    [[ "$dest" == "true" || -z "$dest" ]] && dest="/home/${app}/cipi.yml"
+    [[ "$dest" == "true" || -z "$dest" ]] && dest="/home/${app}/$(_yml_default_name "$(_yml_env_label "$app")")"
     if [[ "$dest" == *$'\n'* ]]; then
         error "Refusing to write ${dest}"
         rm -f "$src"
@@ -4074,6 +4176,10 @@ _yml_example() {
 #
 # Only this app is ever touched: databases must be named ${app} or ${app}_*,
 # and backup profiles ${app} or ${app}-*. Everything else is rejected.
+#
+# One repository, several apps: an app with environment label <env>
+# (cipi app create --env, production by default) reads cipi-<env>.yml before
+# cipi.yml — commit cipi-staging.yml next to cipi.yml and each app finds its own.
 #
 # Tip: to start from what the server already has, use
 #   cipi yml generate ${app} --save
@@ -4160,6 +4266,8 @@ search: false
 # only once the release is already live. post runs on both 'cipi deploy' and
 # the Git webhook and does not require 'cipi yml auto'.
 deploy:
+  # branch: main              # the git branch this app deploys (cipi app edit --branch),
+  #                           # from the next deploy — e.g. develop in cipi-staging.yml
   # keep_releases: 5          # releases kept for rollback (1-20)
   # migrate: false            # skip artisan:migrate in the recipe
   # optimize: true            # artisan:optimize after vendors

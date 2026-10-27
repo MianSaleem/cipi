@@ -41,7 +41,8 @@ grep -q '_nginx_cipi_yml_deny_block' "${LIB}/app.sh" \
 n=$(grep -c '${cipi_yml_deny}' "${LIB}/app.sh" || true)
 [[ "$n" -eq 3 ]] && pass "all three vhost templates include the deny" \
     || fail "expected 3 \${cipi_yml_deny} insertions, got ${n}"
-grep -qF 'cipi\.ya?ml$' "${LIB}/app.sh" \
+# 5.8.0 widened the pattern to the per-environment cipi-<env>.yml as well.
+grep -qF 'cipi(-[a-z0-9_-]+)?\.ya?ml$' "${LIB}/app.sh" \
     && pass "deny matches cipi.yml and cipi.yaml (any path, any case)" \
     || fail "deny regex is missing or too narrow"
 
@@ -78,7 +79,7 @@ _render_vhost() {
 }
 
 custom_out=$(_render_vhost custom)
-if grep -qF 'location ~* /cipi\.ya?ml$ { deny all; }' <<< "$custom_out"; then
+if grep -qF 'location ~* /cipi(-[a-z0-9_-]+)?\.ya?ml$ { deny all; }' <<< "$custom_out"; then
     pass "custom vhost denies /cipi.yml"
 else
     fail "custom vhost missing deny: ${custom_out}"
@@ -88,7 +89,7 @@ grep -q 'root /home/demo/htdocs;' <<< "$custom_out" \
     || fail "custom vhost root is not htdocs/: ${custom_out}"
 
 laravel_out=$(_render_vhost laravel)
-if grep -qF 'location ~* /cipi\.ya?ml$ { deny all; }' <<< "$laravel_out"; then
+if grep -qF 'location ~* /cipi(-[a-z0-9_-]+)?\.ya?ml$ { deny all; }' <<< "$laravel_out"; then
     pass "Laravel vhost denies /cipi.yml too"
 else
     fail "Laravel vhost missing deny: ${laravel_out}"
@@ -98,9 +99,12 @@ grep -q 'root /home/demo/current/public;' <<< "$laravel_out" \
     || fail "Laravel vhost root drifted: ${laravel_out}"
 
 echo "-- lookup on custom apps"
-grep -q '"/home/${app}/htdocs/cipi.yml"' "${LIB}/yml.sh" \
+# Since 5.8.0 the paths come from _yml_candidates (current, htdocs, shared ×
+# the names of _yml_names_for_env).
+_cands=$(bash -c "$(sed -n '/^_yml_names_for_env() {/,/^}/p' "${LIB}/yml.sh"); $(sed -n '/^_yml_candidates() {/,/^}/p' "${LIB}/yml.sh"); _yml_env_label(){ echo production; }; _yml_candidates demo")
+grep -q '^/home/demo/htdocs/cipi.yml$' <<< "$_cands" \
     && pass "_yml_find_file looks in htdocs/cipi.yml" || fail "_yml_find_file skips htdocs"
-grep -q '"/home/${app}/htdocs/cipi.yaml"' "${LIB}/yml.sh" \
+grep -q '^/home/demo/htdocs/cipi.yaml$' <<< "$_cands" \
     && pass "_yml_find_file looks in htdocs/cipi.yaml" || fail "_yml_find_file skips htdocs yaml"
 grep -q 'file=$(_yml_find_file "$app")' "${LIB}/yml.sh" \
     && pass "post-deploy uses _yml_find_file (so htdocs is covered)" \

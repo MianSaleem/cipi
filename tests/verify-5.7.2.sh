@@ -222,7 +222,10 @@ redis=$(bash -c "vault_read() { echo '{}'; }; $(extract app.sh _app_redis_env_bl
 [[ -z "$redis" ]] && pass "no Valkey password: no REDIS_* lines" || fail "redis block without password: '${redis}'"
 grep -q '^CIPI_DEPLOY_BRANCH=\${branch}$' "${LIB}/app.sh" && grep -q '^QUEUE_CONNECTION=database\${redis_env}$' "${LIB}/app.sh" \
     && pass "app create .env template carries both" || fail ".env template"
-grep -q 'app_env_set_deploy_branch "$app" "${ARG_branch}"' "${LIB}/app.sh" && pass "app edit --branch updates .env" || fail "app edit --branch"
+# Since 5.8.0 the branch change goes through app_branch_set (shared with cipi yml apply).
+grep -q 'app_branch_set "$app" "${ARG_branch}"' "${LIB}/app.sh" \
+    && sed -n '/^app_branch_set() {/,/^}/p' "${LIB}/app.sh" | grep -q 'app_env_set_deploy_branch "$app" "$branch"' \
+    && pass "app edit --branch updates .env" || fail "app edit --branch"
 # cipi reset valkey-password keeps the generated REDIS_PASSWORD in step.
 RSFN="${TMP}/reset.sh"
 {

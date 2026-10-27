@@ -114,13 +114,15 @@ _yml_find_file(){ [[ -f "${TMP}/cipi.yml" ]] && { echo "${TMP}/cipi.yml"; return
 visudo() { return "${VISUDO_RC:-0}"; }
 EOS
     fn "${LIB}/yml.sh" yml_auto_sudoers_sync
+    fn "${LIB}/yml.sh" _yml_env_label
     fn "${LIB}/yml.sh" _yml_auto_cmd
 } | sed "s#/etc/sudoers.d/#${TMP}/sudoers.d/#g" > "${TMP}/auto.sh"
 run_auto() { ( export TMP VISUDO_RC="${VISUDO_RC:-0}"; source "${TMP}/auto.sh"; _yml_auto_cmd "$@" ); }
 
 rm -f "${TMP}/flag-shop" "${TMP}/cipi.yml" "${TMP}/sudoers.d/"*
 o=$(run_auto shop status --json)
-[[ "$(jq -c . <<< "$o")" == '{"app":"shop","auto":false,"sudoers":false,"file":null}' ]] \
+# 5.8.0 added env (production for an app without the key).
+[[ "$(jq -c . <<< "$o")" == '{"app":"shop","env":"production","auto":false,"sudoers":false,"file":null}' ]] \
     && pass "status --json, auto off, no file" || fail "status --json: ${o}"
 o=$(run_auto shop on) && [[ "$(cat "${TMP}/flag-shop")" == true && -f "${TMP}/sudoers.d/cipi-shop-yml" ]] \
     && pass "on: flag and rule" || fail "on: ${o}"

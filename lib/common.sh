@@ -482,6 +482,43 @@ app_env_set_deploy_branch() {
     fi
 }
 
+# Environment label of an app (cipi app create --env): production, staging,
+# …. A plain lowercase word, because it becomes part of a file name in the
+# repository (cipi-<env>.yml) and a value in the app's .env (APP_ENV).
+validate_env_label() { [[ "${1:-}" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; }
+# shellcheck disable=SC2034  # read by app.sh (create, edit, clone)
+ENV_LABEL_HELP="Use lowercase letters, digits, '-' and '_' (max 32 chars), such as production or staging"
+
+# The label of an app. Apps created before 5.8.0 carry no key: production.
+app_env_label() {
+    local e; e=$(app_get "${1:-}" env 2>/dev/null)
+    validate_env_label "$e" && echo "$e" || echo production
+}
+
+# The label in a Laravel or Node app's shared/.env. CIPI_ENV is what the
+# post-deploy runner — the app user, who cannot read apps.json — uses to pick
+# cipi-<env>.yml; APP_ENV is Laravel's own switch and follows only when it is
+# already there. Written at create, kept in step by `cipi app edit --env`,
+# `cipi app clone` and `cipi sync import|update`. With $3 = add, a CIPI_ENV
+# already there is left alone and APP_ENV is not touched (migration 5.8.0
+# fills the gap on existing apps without changing a value someone chose).
+app_env_set_environment() {
+    local app="${1:-}" label="${2:-}" mode="${3:-set}" env="/home/${1:-}/shared/.env"
+    [[ -n "$app" && -f "$env" ]] || return 0
+    validate_env_label "$label" || return 1
+    if grep -q '^CIPI_ENV=' "$env" 2>/dev/null; then
+        [[ "$mode" == "add" ]] && return 0
+        sed -i "s|^CIPI_ENV=.*|CIPI_ENV=${label}|" "$env"
+    else
+        printf 'CIPI_ENV=%s\n' "$label" >> "$env"
+    fi
+    [[ "$mode" == "add" ]] && return 0
+    if grep -q '^APP_ENV=' "$env" 2>/dev/null; then
+        sed -i "s|^APP_ENV=.*|APP_ENV=${label}|" "$env"
+    fi
+    return 0
+}
+
 # True if a systemd unit file exists.
 # Note: `systemctl list-unit-files --quiet UNIT` exits 0 even when zero units
 # match, so it must not be used as an existence check.
@@ -629,7 +666,7 @@ _update_apps_public() {
     json=$(vault_read apps.json) || return 0
     echo "$json" | jq '
         with_entries(.value |= {
-            domain, aliases, php, branch, repository, user, created_at, suspended,
+            domain, aliases, php, branch, env: (.env // "production"), repository, user, created_at, suspended,
             basic_auth, www_redirect, redirect, redirects, proxies, force_https, custom, docroot, engine,
             octane, octane_port, reverb, reverb_port, horizon, schedule, node_build,
             cloned_from, predeploy_snapshot, limits, ini, health_url, health_expect,

@@ -11,6 +11,7 @@ app_create() {
     source "${CIPI_LIB}/db.sh"
     local app_user="${ARG_user:-}" domain="${ARG_domain:-}" repository="${ARG_repository:-}"
     local branch="${ARG_branch:-main}" php_ver="${ARG_php:-8.5}"
+    local env_label="${ARG_env:-production}"
     local is_custom="${ARG_custom:-false}"
     local db_engine="${ARG_engine:-}"
     local octane_server="" octane_port=""
@@ -121,6 +122,11 @@ app_create() {
     elif [[ -z "${ARG_branch:-}" ]]; then
         read_input "Branch" "$branch" branch
     fi
+    # The environment label picks cipi-<env>.yml over cipi.yml and is written
+    # to .env (APP_ENV, CIPI_ENV). Asked only on a terminal: it has a default.
+    if [[ -z "${ARG_env:-}" && -t 0 ]]; then
+        read_input "Environment (production, staging, …)" "$env_label" env_label
+    fi
     if [[ "$app_type" == "node" ]]; then
         # PHP only runs Deployer and the webhook receiver here: take the newest
         # one installed instead of asking.
@@ -165,6 +171,8 @@ app_create() {
     validate_php_version "$php_ver" || { error "Invalid PHP version. Use: 8.3 8.4 8.5"; exit 1; }
     [[ -n "$repository" ]] && { validate_git_repository "$repository" || { error "Invalid repository URL '${repository}'"; exit 1; }; }
     [[ -n "$branch" ]]     && { validate_git_branch "$branch"         || { error "Invalid branch name '${branch}'"; exit 1; }; }
+    [[ "${ARG_env:-}" == "true" ]] && { error "--env needs a value: --env=staging"; exit 1; }
+    validate_env_label "$env_label" || { error "Invalid --env '${env_label}'. ${ENV_LABEL_HELP}"; exit 1; }
     php_is_installed "$php_ver"    || { error "PHP $php_ver not installed. Run: cipi php install $php_ver"; exit 1; }
     app_exists "$app_user"         && { error "App '${app_user}' already exists"; exit 1; }
     id "$app_user" &>/dev/null     && { error "User '${app_user}' already exists"; exit 1; }
@@ -305,6 +313,7 @@ HTML
 # baked into the bundle: redeploy after changing them.
 # PORT and HOST are set by Cipi for the blue/green slot and cannot be overridden.
 NODE_ENV=production
+CIPI_ENV=${env_label}
 ENV
     fi
     if [[ "$app_type" == "node" ]]; then
@@ -391,7 +400,7 @@ BASH
         redis_env=$(_app_redis_env_block)
         cat > "${home}/shared/.env" <<ENV
 APP_NAME="${app_user}"
-APP_ENV=production
+APP_ENV=${env_label}
 APP_KEY=${app_key}
 APP_DEBUG=false
 APP_URL=https://${url_host}
@@ -412,6 +421,7 @@ CIPI_WEBHOOK_TOKEN=${webhook_token}
 CIPI_APP_USER=${app_user}
 CIPI_PHP_VERSION=${php_ver}
 CIPI_DEPLOY_BRANCH=${branch}
+CIPI_ENV=${env_label}
 ENV
         if [[ -n "$octane_server" ]]; then
             cat >> "${home}/shared/.env" <<ENV
@@ -446,11 +456,12 @@ ENV
     if [[ "$app_type" == "node" ]]; then
         app_save "$app_user" "$(jq -n \
             --arg user "$app_user" --arg domain "$domain" --arg repo "$repository" --arg branch "$branch" \
+            --arg env "$env_label" \
             --arg php "$php_ver" --arg wt "$webhook_token" --arg mode "$NODE_OPT_MODE" \
             --arg ver "$NODE_OPT_VERSION" --arg fw "$NODE_OPT_FRAMEWORK" --arg build "$NODE_OPT_BUILD" \
             --arg start "$NODE_OPT_START" --arg output "$NODE_OPT_OUTPUT" --arg health "$NODE_OPT_HEALTH" \
             --arg ports "$node_ports" --arg created "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '
-            {user: $user, domain: $domain, aliases: [], repository: $repo, branch: $branch, php: $php,
+            {user: $user, domain: $domain, aliases: [], repository: $repo, branch: $branch, env: $env, php: $php,
              custom: true, runtime: "node", node_mode: $mode, node_version: $ver, node_build: $build,
              webhook_token: $wt, created_at: $created}
             + (if $fw != "" then {node_framework: $fw} else {} end)
@@ -467,6 +478,7 @@ ENV
     "aliases": [],
     "repository": "${repository}",
     "branch": "${branch}",
+    "env": "${env_label}",
     "php": "${php_ver}",
     "custom": true,
     "docroot": "${docroot}",
@@ -482,6 +494,7 @@ JSON
     "aliases": [],
     "repository": "${repository}",
     "branch": "${branch}",
+    "env": "${env_label}",
     "php": "${php_ver}",
     "engine": "${db_engine}",
     "octane": "${octane_server}",
@@ -500,6 +513,7 @@ JSON
     "aliases": [],
     "repository": "${repository}",
     "branch": "${branch}",
+    "env": "${env_label}",
     "php": "${php_ver}",
     "engine": "${db_engine}",
     "schedule": "on",
@@ -514,7 +528,7 @@ JSON
         git_save_app_data "$app_user" "$GIT_PROVIDER" "${GIT_DEPLOY_KEY_ID:-}" "${GIT_WEBHOOK_ID:-}"
     fi
     [[ -n "$node_build" ]] && app_set "$app_user" node_build "$node_build"
-    log_action "APP CREATED: $app_user domain=$domain php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
+    log_action "APP CREATED: $app_user domain=$domain env=${env_label} php=$php_ver engine=${db_engine:-none} octane=${octane_server:-none}${NODE_OPT_MODE:+ node=${NODE_OPT_MODE}/${NODE_OPT_VERSION}}${node_build:+ build=${node_build}}"
 
     # Email notification
     local _notify_repo _notify_branch
@@ -626,6 +640,7 @@ SUDO
     local server_ip; server_ip=$(curl -s --max-time 3 https://checkip.amazonaws.com 2>/dev/null || hostname)
     echo -e "  Domain:     ${CYAN}${domain}${NC}"
     echo -e "  IP:         ${CYAN}${server_ip}${NC}"
+    echo -e "  Env:        ${CYAN}${env_label}${NC}"
     echo -e "  PHP:        ${CYAN}${php_ver}${NC}"
     if [[ -n "$octane_server" ]]; then
         echo -e "  Runtime:    ${CYAN}Octane (${octane_server}) :${octane_port}${NC}"
@@ -869,6 +884,7 @@ app_show() {
     fi
     printf "  %-14s ${CYAN}%s${NC}\n" "Repository" "$repo"
     printf "  %-14s ${CYAN}%s${NC}\n" "Branch" "$b"
+    printf "  %-14s ${CYAN}%s${NC}\n" "Environment" "$(app_env_label "$app")"
     printf "  %-14s ${CYAN}%s${NC}\n" "PHP" "$p"
     local octane_show octane_port_show
     octane_show=$(app_get "$app" octane)
@@ -1042,9 +1058,29 @@ _app_change_domain() {
 
 # ── EDIT ──────────────────────────────────────────────────────
 
+# Point an app at another git branch: apps.json, the Deployer recipe and what
+# the webhook reads (CIPI_DEPLOY_BRANCH in .env, or the Node webhook config).
+# `cipi app edit --branch` and `cipi yml apply` (deploy.branch) both go
+# through here, so the two paths cannot drift. The caller validates the name
+# and says what happened.
+app_branch_set() {
+    local app="$1" branch="$2" safe_branch
+    app_set "$app" branch "$branch"
+    safe_branch=$(printf '%s' "$branch" | sed 's/[&|\\\/]/\\&/g')
+    sed -i "s|set('branch', '.*')|set('branch', '${safe_branch}')|" "/home/${app}/.deployer/deploy.php"
+    if [[ "$(app_get "$app" runtime)" == "node" ]]; then
+        # shellcheck source=/dev/null
+        declare -f _node_webhook_config >/dev/null 2>&1 || source "${CIPI_LIB}/node.sh"
+        _node_webhook_config "$app"
+    else
+        # The webhook of cipi/agent reads the branch from .env.
+        app_env_set_deploy_branch "$app" "$branch"
+    fi
+}
+
 app_edit() {
     local app="${1:-}"; shift || true
-    [[ -z "$app" ]] && { error "Usage: cipi app edit <app> [--domain=D] [--php=X.Y] [--branch=B] [--repository=URL] [--node-build=CMD|--no-node-build] [--predeploy-snapshot|--no-predeploy-snapshot]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi app edit <app> [--domain=D] [--php=X.Y] [--branch=B] [--env=LABEL] [--repository=URL] [--node-build=CMD|--no-node-build] [--predeploy-snapshot|--no-predeploy-snapshot]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
     local changed=false cur_php domain_change_from="" repo_changed=false
@@ -1105,18 +1141,22 @@ app_edit() {
             info "Branch already '${ARG_branch}'"
         else
             validate_git_branch "${ARG_branch}" || { error "Invalid branch name '${ARG_branch}'"; exit 1; }
-            app_set "$app" branch "${ARG_branch}"
-            local safe_branch; safe_branch=$(printf '%s' "${ARG_branch}" | sed 's/[&|\\\/]/\\&/g')
-            sed -i "s|set('branch', '.*')|set('branch', '${safe_branch}')|" "/home/${app}/.deployer/deploy.php"
-            if [[ "$(app_get "$app" runtime)" == "node" ]]; then
-                # shellcheck source=/dev/null
-                source "${CIPI_LIB}/node.sh"
-                _node_webhook_config "$app"
-            else
-                # The webhook of cipi/agent reads the branch from .env.
-                app_env_set_deploy_branch "$app" "${ARG_branch}"
-            fi
+            app_branch_set "$app" "${ARG_branch}"
             success "Branch → ${ARG_branch}"; changed=true; repo_changed=true
+        fi
+    fi
+    if [[ -n "${ARG_env:-}" ]]; then
+        [[ "${ARG_env}" == "true" ]] && { error "--env needs a value: --env=staging"; exit 1; }
+        local cur_env; cur_env=$(app_env_label "$app")
+        if [[ "${ARG_env}" == "$cur_env" ]]; then
+            info "Environment already '${ARG_env}'"
+        else
+            validate_env_label "${ARG_env}" || { error "Invalid --env '${ARG_env}'. ${ENV_LABEL_HELP}"; exit 1; }
+            app_set "$app" env "${ARG_env}"
+            # The post-deploy runner reads CIPI_ENV from .env; Laravel reads APP_ENV.
+            app_env_set_environment "$app" "${ARG_env}"
+            success "Env → ${ARG_env}"; changed=true
+            info "Deploys now read cipi-${ARG_env}.yml before cipi.yml (cipi yml auto ${app} status)"
         fi
     fi
     if [[ -n "${ARG_repository:-}" ]]; then
@@ -1259,7 +1299,7 @@ app_edit() {
         app_unset "$app" predeploy_snapshot
         success "Pre-deploy DB snapshot disabled"; changed=true
     fi
-    [[ "$changed" == false ]] && info "Nothing changed. Use --domain, --php, --branch, --repository, --node-build, or --predeploy-snapshot"
+    [[ "$changed" == false ]] && info "Nothing changed. Use --domain, --php, --branch, --env, --repository, --node-build, or --predeploy-snapshot"
     if [[ "$changed" == true ]]; then
         log_action "APP EDITED: $app $*"
 
@@ -2347,14 +2387,16 @@ EOF
 # connections that stop answering its pings, so it — not nginx — is what reaps
 # dead clients here.
 
-# Keep cipi.yml / cipi.yaml off the public web. Custom apps serve htdocs/ (or
-# a subdirectory) as the document root, so a committed file would otherwise be
-# downloadable. Laravel's public/ already hides the repo root; this is belt
-# and braces for a copy in public/ or a custom docroot that points at the tree.
-# ~* so Cipi.YML is covered too; the path match is anywhere, not only /.
+# Keep cipi.yml / cipi.yaml and the per-environment cipi-<env>.yml off the
+# public web. Custom apps serve htdocs/ (or a subdirectory) as the document
+# root, so a committed file would otherwise be downloadable. Laravel's public/
+# already hides the repo root; this is belt and braces for a copy in public/
+# or a custom docroot that points at the tree. ~* so Cipi.YML is covered too;
+# the path match is anywhere, not only /. Migration 5.8.0 rolls the wider
+# pattern into vhosts written before it.
 _nginx_cipi_yml_deny_block() {
     cat <<'EOF'
-    location ~* /cipi\.ya?ml$ { deny all; }
+    location ~* /cipi(-[a-z0-9_-]+)?\.ya?ml$ { deny all; }
 EOF
 }
 
@@ -4206,7 +4248,7 @@ app_limits() {
 
 app_clone() {
     local src="${1:-}"; shift || true
-    [[ -z "$src" ]] && { error "Usage: cipi app clone <src> --domain=D [--name=] [--branch=] [--with-db|--no-db]"; exit 1; }
+    [[ -z "$src" ]] && { error "Usage: cipi app clone <src> --domain=D [--name=] [--branch=] [--env=] [--with-db|--no-db]"; exit 1; }
     app_exists "$src" || { error "Source app '$src' not found"; exit 1; }
     parse_args "$@"
 
@@ -4227,15 +4269,20 @@ app_clone() {
 
     [[ "$(app_get "$src" custom)" == "true" ]] && { error "Cloning custom apps is not supported"; exit 1; }
 
-    local branch php_ver engine repo with_db="true"
+    local branch php_ver engine repo with_db="true" env_label
     branch="${ARG_branch:-$(app_get "$src" branch)}"
+    # A clone is usually the staging copy: --env names it; without the flag
+    # it keeps the source's label.
+    [[ "${ARG_env:-}" == "true" ]] && { error "--env needs a value: --env=staging"; exit 1; }
+    env_label="${ARG_env:-$(app_env_label "$src")}"
+    validate_env_label "$env_label" || { error "Invalid --env '${env_label}'. ${ENV_LABEL_HELP}"; exit 1; }
     php_ver=$(app_get "$src" php)
     engine=$(app_get "$src" engine); [[ -z "$engine" ]] && engine="mariadb"
     repo=$(app_get "$src" repository)
     [[ "${ARG_no_db:-}" == "true" ]] && with_db="false"
     [[ "${ARG_with_db:-}" == "true" ]] && with_db="true"
 
-    local create_args=(--user="$name" --domain="$domain" --repository="$repo" --branch="$branch" --php="$php_ver" --engine="$engine")
+    local create_args=(--user="$name" --domain="$domain" --repository="$repo" --branch="$branch" --env="$env_label" --php="$php_ver" --engine="$engine")
     if [[ -n "$(app_get "$src" octane)" ]]; then
         create_args+=(--octane=frankenphp)
     fi
@@ -4265,7 +4312,8 @@ app_clone() {
                 # clone that inherited it would not fail — it would reindex
                 # straight into production's indexes. The clone gets its own
                 # key and prefix below.
-                APP_KEY|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
+                # APP_ENV is the clone's own label (--env), already in its .env.
+                APP_KEY|APP_ENV|APP_URL|DB_*|DATABASE_URL|CIPI_*|OCTANE_*|REVERB_*|VITE_REVERB_*) continue ;;
                 MEILISEARCH_*|SCOUT_PREFIX) continue ;;
             esac
             _env_set_or_add "$dst_env" "$key" "${line#*=}"

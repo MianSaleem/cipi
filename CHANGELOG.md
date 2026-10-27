@@ -4,6 +4,33 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.0] — 2026-10-27
+
+A request from the field: one repository deployed as a staging app and as a production app, and one `cipi.yml` that could not serve both — its databases must be named after the app, its healthcheck must sit on the app's domain, its aliases differ. The file now follows the app's environment, and it can say which branch to deploy.
+
+### Added — `cipi app create --env`: an environment label per app
+
+- `cipi app create --env=staging` (default `production`; lowercase letters, digits, `-` and `_`, max 32 chars). The wizard asks it after the branch, with the default on Enter. `cipi app edit <app> --env=…` changes it, `cipi app clone <src> --env=staging` names the copy (without the flag the clone keeps the source's label), `cipi app show` prints it, and `apps-public.json` carries `env` for the API, the GUI and the CLI — `production` when an app predates 5.8.0 and has no key.
+- The label is written to the app's `shared/.env`: `APP_ENV=<env>` (Laravel's own switch, hard-wired to `production` until now) and `CIPI_ENV=<env>` (Laravel and Node apps). `cipi app edit --env` updates both, `cipi app clone` no longer copies the source's `APP_ENV` over the clone's, and `cipi sync import|update` keeps them in step. Migration 5.8.0 adds `CIPI_ENV` to existing apps that lack it and leaves `APP_ENV` alone.
+
+### Added — `cipi-<env>.yml`: a cipi.yml per environment
+
+- An app with label `<env>` reads `cipi-<env>.yml` (or `.yaml`) before `cipi.yml`, in each place it already looked: the live release, a custom app's `htdocs/`, then `shared/`. A production app reads `cipi-production.yml` then `cipi.yml`, so a repository with the plain file alone behaves as before. One repository can now carry `cipi-staging.yml` next to `cipi.yml` and each app finds its own.
+- The server picks the file from the app's label; the file never says which app it is for. A `cipi-<env>.yml` that fails validation is an error naming the file, never a silent fall back on `cipi.yml` — a staging app must not apply production's configuration because of a typo. The post-deploy runner, which runs as the app user and cannot read `apps.json`, takes the label from `CIPI_ENV` in `.env`; `cipi deploy` and the webhook therefore read the same file.
+- `cipi yml auto <app> status` prints the environment and the file in use; `cipi yml plan --json` and `cipi yml auto --json` carry `env`. `cipi yml generate` names the file to commit (`cipi-staging.yml` for a staging app; `--save` writes it under that name) and the "No cipi.yml found" message lists the names it looked for.
+- nginx denies `/cipi-<anything>.yml|yaml` as it denied `/cipi.yml` (lib/app.sh `_nginx_cipi_yml_deny_block`). Migration 5.8.0 widens the rule on every vhost written before it, keeps the previous vhosts in `/var/lib/cipi/vhost-backup-5.8.0` and puts them back if `nginx -t` refuses.
+
+### Added — `deploy.branch` in cipi.yml
+
+- `deploy: { branch: develop }` declares the git branch the app deploys, with the validation of `cipi app edit --branch` (letters, digits, `.`, `_`, `/` and `-`, max 191 chars, never `..`). `cipi yml plan` shows `deploy branch: main → develop (from the next deploy)`; `cipi yml apply` goes through the same code as `cipi app edit --branch` (`app_branch_set`: `apps.json`, the Deployer recipe, `CIPI_DEPLOY_BRANCH` in `.env` or the Node webhook config), so the two paths cannot drift. Blocked for an app without a repository. `cipi yml generate` emits it, `cipi yml example` documents it.
+- The usual pair: `cipi-staging.yml` with `branch: develop`, `cipi.yml` with `branch: main`.
+
+### Ecosystem
+
+- cipi/api, cipi-cli, the PHP SDK, the GUI, cipi/agent and Cipi Studio take and show `env` on app create, edit and show, and `env` on the cipi.yml endpoint, in their own releases.
+
+---
+
 ## [5.7.2] — 2026-10-27
 
 Six reports from one user in the field, and the PHP advisory of 2026-10-21 taken one step further.
