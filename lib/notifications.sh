@@ -75,6 +75,8 @@ ssh_key_remove|SSH keys|SSH key removed
 ssh_login|Security|SSH login (cipi/root/sudo users)
 sudo|Security|Sudo elevation
 su|Security|su to root by cipi
+credentials_show|Security|Server credentials shown or exported (cipi credentials)
+gui_sso|Security|GUI single sign-on configured or disabled
 crowdsec_enable|Security|CrowdSec enabled
 crowdsec_disable|Security|CrowdSec disabled
 crowdsec_rescue|Security|CrowdSec rescue token used or rotated

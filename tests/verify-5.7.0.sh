@@ -63,6 +63,8 @@ error(){ echo "ERR $*" >&2; }; step(){ echo "STEP $*"; }
 log_action(){ echo "log_action $*" >> "${CALLS}"; }
 cipi_notify(){ :; }
 confirm(){ return 1; }
+# 5.8.2: the moves check the DNS of the new name first; here the name always points at the server.
+panel_dns_check(){ echo "panel_dns_check $*" >> "${CALLS}"; return 0; }
 vault_read(){ cat "${CIPI_CONFIG}/$1"; }
 vault_write(){ cat > "${CIPI_CONFIG}/$1.tmp" && mv "${CIPI_CONFIG}/$1.tmp" "${CIPI_CONFIG}/$1"; }
 certbot(){
@@ -90,10 +92,10 @@ EOS
              panel_domain_check panel_cert_names panel_cert_delete; do
         fn "${LIB}/common.sh" "$f"
     done
-    for f in api_setup api_ssl _api_create_nginx_vhost _api_set_app_url api_move _api_is_installed api_remove; do
+    for f in api_setup api_ssl _api_ssl_issue _api_create_nginx_vhost _api_set_app_url api_move _api_is_installed api_remove; do
         fn "${LIB}/api.sh" "$f"
     done
-    for f in gui_setup gui_ssl _gui_zt_domain _gui_require_off_tunnel _gui_set_app_url gui_move \
+    for f in gui_setup gui_ssl _gui_ssl_issue _gui_zt_domain _gui_require_off_tunnel _gui_set_app_url gui_move \
              _gui_create_nginx_vhost _gui_is_installed gui_remove; do
         fn "${LIB}/gui.sh" "$f"
     done

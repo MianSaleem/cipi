@@ -55,8 +55,8 @@ _cipi_complete() {
         words=("${COMP_WORDS[@]}"); cword=$COMP_CWORD
     fi
 
-    local commands="status disk version self-update service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset completion help"
-    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset server completion all"
+    local commands="status disk version self-update service app use node alias domains www redirect proxy auth basicauth deploy worker schedule health monitor db search ssl php package firewall ban crowdsec zt scan compliance backup ini yml nginx api gui git sync ssh smtp notifications reset credentials completion help"
+    local topics="app use node domains www redirect proxy deploy worker schedule health monitor db search service ssl php package auth basicauth ssh firewall ban crowdsec zt scan compliance backup sync git ini yml nginx api gui smtp notifications reset credentials server completion all"
 
     # skip a leading path/wrapper (e.g. `sudo cipi`, `/usr/local/bin/cipi`)
     local start=1 j
@@ -341,17 +341,28 @@ _cipi_complete() {
                 1) sub="ssl move remove update upgrade status token ip-whitelist fix-permissions" ;;
                 2) case "$w1" in
                        remove)       sub="--force" ;;
+                       ssl)          sub="--skip-dns-check" ;;
                        token)        sub="list create revoke" ;;
                        ip-whitelist) sub="show add remove set allow-all" ;;
+                       *.*)          sub="--no-ssl --no-token --skip-dns-check" ;;
                    esac ;;
+                3) [[ "$w1" == move ]] && sub="--no-ssl --skip-dns-check" ;;
             esac ;;
 
         gui|panel)
             case $pos in
-                1) sub="ssl move update refresh-theme upgrade status fix-permissions repair reset-user remove" ;;
+                1) sub="ssl move update refresh-theme upgrade status fix-permissions repair reset-user sso remove" ;;
                 2) case "$w1" in
                        remove) sub="--force" ;;
+                       ssl)    sub="--skip-dns-check" ;;
+                       sso)    sub="set status only disable" ;;
+                       *.*)    sub="--no-ssl --skip-dns-check" ;;
                    esac ;;
+                3) case "$w1" in
+                       move) sub="--no-ssl --skip-dns-check" ;;
+                       sso)  case "$w2" in set) sub="--issuer= --client-id= --client-secret= --label= --domains= --only --scopes=" ;; only) sub="on off" ;; esac ;;
+                   esac ;;
+                *) [[ "$w1" == sso && "$w2" == set ]] && sub="--issuer= --client-id= --client-secret= --label= --domains= --only --scopes=" ;;
             esac ;;
         git)
             case $pos in
@@ -401,6 +412,11 @@ _cipi_complete() {
                    esac ;;
             esac ;;
         reset|passwords)          [[ $pos -eq 1 ]] && sub="root-password db-password valkey-password" ;;
+        credentials|creds)
+            case $pos in
+                1) sub="show export" ;;
+                *) [[ "$w1" == export ]] && sub="--output=" ;;
+            esac ;;
     esac
 
     [[ -n "$sub" ]] && COMPREPLY=( $(compgen -W "$sub" -- "$cur") )

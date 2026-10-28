@@ -269,53 +269,172 @@ EOF
 
 # ── SSH: COLLECT KEY (interactive, before long installs) ─────
 
-collect_ssh_key() {
+# The keys that will open the cipi user. One is required; more can follow
+# (a second machine, a colleague), each checked and shown with its
+# fingerprint. SSH_PUBKEY (non-interactive) may hold several, one per line.
+SSH_PUBKEYS=()
+SERVER_IP=""
+
+# A terminal to ask on: this script's own stdin is the pipe from wget.
+_has_tty() { [[ -r /dev/tty && -w /dev/tty ]] && (true < /dev/tty) 2>/dev/null; }
+
+_ask_yn() {
+    local a
+    echo -en "  ${BOLD}$1${NC} [y/N] "
+    read -r a < /dev/tty
+    [[ "$a" =~ ^[Yy]$ ]]
+}
+
+_ssh_key_clean() { printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+_ssh_key_valid() { printf '%s\n' "$1" | grep -qE '^(ssh-(rsa|ed25519)|ecdsa-sha2-\S+) '; }
+
+# "ssh-ed25519 · SHA256:… · comment"
+_ssh_key_describe() {
+    local fp comment
+    fp=$(printf '%s\n' "$1" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}') || fp=""
+    comment=$(printf '%s\n' "$1" | awk '{$1=$2=""; print}' | xargs)
+    printf '%s · %s%s' "$(printf '%s\n' "$1" | awk '{print $1}')" "${fp:-?}" "${comment:+ · ${comment}}"
+}
+
+# Adds a key to SSH_PUBKEYS: 0 added, 1 empty or not a public key, 2 already there.
+_ssh_key_add() {
+    local k e
+    k=$(_ssh_key_clean "$1")
+    [[ -n "$k" ]] && _ssh_key_valid "$k" || return 1
+    for e in ${SSH_PUBKEYS[@]+"${SSH_PUBKEYS[@]}"}; do
+        [[ "$e" == "$k" ]] && return 2
+    done
+    SSH_PUBKEYS+=("$k")
+    return 0
+}
+
+collect_ssh_keys() {
     echo ""
     echo -e "${BOLD}SSH Security Setup${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo -e "  Cipi disables root SSH login and password authentication."
     echo -e "  A ${BOLD}cipi${NC} user will be created as the only SSH entry point."
-    echo -e "  You will need an SSH public key to access the server."
+    echo -e "  You will need an SSH public key to access the server — one at least;"
+    echo -e "  you can add more (another machine, a colleague) before the install starts."
     echo ""
     echo -e "  ${BOLD}If you already have one${NC}, paste it below."
     echo -e "  Accepted formats: ${CYAN}ssh-rsa${NC}, ${CYAN}ssh-ed25519${NC}, ${CYAN}ecdsa-sha2-*${NC}"
     echo ""
     echo -e "  ${BOLD}If you need to generate one${NC} (on your local machine):"
-    echo -e "  ${DIM}ssh-keygen -t rsa -b 4096${NC}"
-    echo -e "  ${DIM}cat ~/.ssh/id_rsa.pub${NC}"
+    echo -e "  ${DIM}ssh-keygen -t ed25519${NC}"
+    echo -e "  ${DIM}cat ~/.ssh/id_ed25519.pub${NC}"
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    # Accept key from environment variable or interactive input
-    if [[ -n "$SSH_PUBKEY" ]]; then
-        SSH_PUBKEY=$(echo "$SSH_PUBKEY" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        if ! echo "$SSH_PUBKEY" | grep -qE '^(ssh-(rsa|ed25519)|ecdsa-sha2-\S+) '; then
-            echo -e "  ${RED}Invalid SSH_PUBKEY format. Must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-*${NC}"
+    local key rc
+    if [[ -n "${SSH_PUBKEY:-}" ]]; then
+        while IFS= read -r key; do
+            [[ -n "$(_ssh_key_clean "$key")" ]] || continue
+            _ssh_key_add "$key" && rc=0 || rc=$?
+            case $rc in
+                0) echo -e "  ${GREEN}✓${NC} $(_ssh_key_describe "${SSH_PUBKEYS[${#SSH_PUBKEYS[@]}-1]}")" ;;
+                1) echo -e "  ${RED}Invalid SSH_PUBKEY line. Each key must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-*${NC}"; exit 1 ;;
+                2) echo -e "  ${DIM}duplicate key skipped${NC}" ;;
+            esac
+        done <<< "$SSH_PUBKEY"
+        if [[ ${#SSH_PUBKEYS[@]} -eq 0 ]]; then
+            echo -e "  ${RED}SSH_PUBKEY holds no key${NC}"
             exit 1
         fi
-        echo -e "  ${GREEN}✓ SSH key provided via environment${NC}"
+        echo -e "  ${GREEN}✓ ${#SSH_PUBKEYS[@]} SSH key(s) provided via environment${NC}"
     else
-        SSH_PUBKEY=""
+        if ! _has_tty; then
+            echo -e "  ${RED}No terminal to ask for the key. Pass it in the environment:${NC}"
+            echo -e "  ${DIM}SSH_PUBKEY=\"ssh-ed25519 AAAA…\" wget -O - https://cipi.sh/setup.sh | bash${NC}"
+            exit 1
+        fi
         while true; do
-            echo -en "  ${BOLD}Paste your SSH public key:${NC} "
-            read -r SSH_PUBKEY < /dev/tty
-            SSH_PUBKEY=$(echo "$SSH_PUBKEY" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [[ -z "$SSH_PUBKEY" ]]; then
-                echo -e "  ${RED}SSH public key is required.${NC}"
-                continue
+            if [[ ${#SSH_PUBKEYS[@]} -gt 0 ]]; then
+                if ! _ask_yn "Add another SSH public key?"; then
+                    break
+                fi
+                echo -en "  ${BOLD}Paste the SSH public key:${NC} "
+            else
+                echo -en "  ${BOLD}Paste your SSH public key:${NC} "
             fi
-            # Validate format (ssh-rsa, ssh-ed25519, ecdsa-sha2-*)
-            if ! echo "$SSH_PUBKEY" | grep -qE '^(ssh-(rsa|ed25519)|ecdsa-sha2-\S+) '; then
-                echo -e "  ${RED}Invalid key format. Must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-*${NC}"
-                continue
-            fi
-            break
+            read -r key < /dev/tty
+            _ssh_key_add "$key" && rc=0 || rc=$?
+            case $rc in
+                0) echo -e "  ${GREEN}✓ Key ${#SSH_PUBKEYS[@]}:${NC} $(_ssh_key_describe "${SSH_PUBKEYS[${#SSH_PUBKEYS[@]}-1]}")" ;;
+                1)
+                    if [[ -z "$(_ssh_key_clean "$key")" ]]; then
+                        [[ ${#SSH_PUBKEYS[@]} -eq 0 ]] \
+                            && echo -e "  ${RED}An SSH public key is required.${NC}" \
+                            || echo -e "  ${YELLOW}Nothing pasted.${NC}"
+                    else
+                        echo -e "  ${RED}Invalid key format. Must start with ssh-rsa, ssh-ed25519, or ecdsa-sha2-*${NC}"
+                    fi ;;
+                2) echo -e "  ${YELLOW}That key is already in the list.${NC}" ;;
+            esac
         done
     fi
 
-    echo -e "${GREEN}✓ SSH key accepted${NC}"
+    echo ""
+    echo -e "${GREEN}✓ ${#SSH_PUBKEYS[@]} SSH key(s) accepted${NC}"
+}
+
+# ── PLAN ──────────────────────────────────────────────────────
+
+# What the installer is about to do, before it touches the machine, and the
+# chance to stop. The passwords do not exist yet: they are generated during
+# the install and shown once at the end, where the installer waits until
+# they are saved.
+confirm_plan() {
+    SERVER_IP=$(curl -s --connect-timeout 3 --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]') || SERVER_IP=""
+    [[ "$SERVER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    local os k
+    os=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Ubuntu}")
+
+    clear
+    echo ""
+    echo -e "${BOLD}What will be set up${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo -e "  ${BOLD}Server${NC}"
+    echo -e "  IP:             ${CYAN}${SERVER_IP:-unknown}${NC}"
+    echo -e "  Hostname:       ${CYAN}$(hostname)${NC}"
+    echo -e "  OS:             ${CYAN}${os}${NC}"
+    echo ""
+    echo -e "  ${BOLD}SSH access${NC}"
+    echo -e "  User:           ${CYAN}cipi${NC} — key only, sudo for every cipi command"
+    for k in "${SSH_PUBKEYS[@]}"; do
+        echo -e "  Key:            ${CYAN}$(_ssh_key_describe "$k")${NC}"
+    done
+    echo -e "  Root:           ${RED}no SSH login${NC} — ssh cipi@${SERVER_IP:-<ip>}, then su root"
+    echo -e "  Passwords:      ${RED}off${NC} for SSH (app users excepted)"
+    echo ""
+    echo -e "  ${BOLD}Stack${NC}"
+    echo -e "  Nginx · MariaDB 11.4 · PHP 8.5 (FPM) · Composer · Deployer · Node.js 22 · Supervisor"
+    echo -e "  Valkey · Certbot · UFW (22, 80, 443) + fail2ban · swap · unattended security updates"
+    echo ""
+    echo -e "  ${BOLD}Generated during the install, shown once at the end${NC}"
+    echo -e "  root password · MariaDB root password · Valkey password"
+    echo -e "  ${YELLOW}Have a password manager ready: the installer waits until you confirm they are saved.${NC}"
+    echo ""
+    echo -e "  ${DIM}Optional, offered at the end or later: panel API (cipi api), web GUI (cipi gui).${NC}"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    if ! _has_tty; then
+        echo -e "  ${DIM}No terminal — proceeding.${NC}"
+        return 0
+    fi
+    local a
+    echo -en "  ${BOLD}Proceed with the installation?${NC} [Y/n] "
+    read -r a < /dev/tty
+    if [[ "$a" =~ ^[Nn] ]]; then
+        echo ""
+        echo -e "  ${YELLOW}Installation cancelled. Nothing was changed.${NC}"
+        echo ""
+        exit 0
+    fi
 }
 
 # ── SSH HARDENING (applied after base packages are installed) ─
@@ -349,9 +468,9 @@ setup_ssh() {
     groupadd -f cipi-apps
     usermod -aG cipi-ssh cipi
 
-    # 2. Setup user SSH key (owner's key for interactive login)
+    # 2. The owner's keys (interactive login): every key accepted at the start
     mkdir -p /home/cipi/.ssh
-    echo "$SSH_PUBKEY" > /home/cipi/.ssh/authorized_keys
+    printf '%s\n' "${SSH_PUBKEYS[@]}" > /home/cipi/.ssh/authorized_keys
     chmod 700 /home/cipi/.ssh
     chmod 600 /home/cipi/.ssh/authorized_keys
 
@@ -1292,97 +1411,113 @@ EOF
 
 # ── FINAL ─────────────────────────────────────────────────────
 
+# The credentials once, in one layout (a title, then User: and Password:
+# under it), and nothing else on the screen until they are saved — a field
+# user lost the "save these" line under a page of optional commands. The
+# optional layers come after, as questions.
 final_summary() {
     clear
 
-    local SERVER_IP
-    SERVER_IP=$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null || echo "N/A")
+    [[ -n "$SERVER_IP" ]] || SERVER_IP=$(curl -s --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]') || SERVER_IP=""
+    [[ -n "$SERVER_IP" ]] || SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     source "${CIPI_LIB}/vault.sh"
-    local _sj; _sj=$(vault_read server.json)
-    local DB_ROOT_PASS
-    DB_ROOT_PASS=$(echo "$_sj" | jq -r '.db_root_password')
-    local VALKEY_USER VALKEY_PASS
-    VALKEY_USER=$(echo "$_sj" | jq -r '.valkey_user // .redis_user // "default"')
-    VALKEY_PASS=$(echo "$_sj" | jq -r '.valkey_password // .redis_password // ""')
+    source "${CIPI_LIB}/credentials.sh"
+    CRED_SERVER_IP="$SERVER_IP"
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "  ${GREEN}${BOLD}CIPI v${BUILD} INSTALLED SUCCESSFULLY${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo -e "  ${BOLD}Server${NC}"
-    echo -e "  IP:             ${CYAN}${SERVER_IP}${NC}"
-    echo -e "  OS:             ${CYAN}Ubuntu $(lsb_release -rs)${NC}"
+    echo -e "  ${YELLOW}${BOLD}⚠ SAVE THESE CREDENTIALS NOW${NC}"
+    echo -e "  ${DIM}Shown once here. Again later, logged in as cipi: sudo cipi credentials${NC}"
+    echo -e "  ${DIM}As CSV for your password manager: sudo cipi credentials export${NC}"
     echo ""
-    echo -e "  ${BOLD}MariaDB Root${NC}"
-    echo -e "  User:           ${CYAN}root${NC}"
-    echo -e "  Password:       ${CYAN}${DB_ROOT_PASS}${NC}"
+    credentials_card
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    _confirm_credentials_saved
     echo ""
-    if [[ -n "$VALKEY_PASS" ]]; then
-    echo -e "  ${BOLD}Valkey${NC}"
-    echo -e "  User:           ${CYAN}${VALKEY_USER}${NC}"
-    echo -e "  Password:       ${CYAN}${VALKEY_PASS}${NC}"
-    echo ""
-    fi
-    local ROOT_PASS
-    ROOT_PASS=$(echo "$_sj" | jq -r '.root_password // ""')
-
-    echo -e "  ${BOLD}Root${NC}"
-    echo -e "  Password:       ${CYAN}${ROOT_PASS}${NC}"
-    echo -e "  SSH login:      ${RED}disabled${NC} (use "su root" after SSH)"
-    echo ""
-    echo -e "  ${BOLD}SSH Access${NC}"
-    echo -e "  User:           ${CYAN}cipi${NC} (key-only, sudo enabled)"
-    echo -e "  Login:          ${CYAN}ssh cipi@${SERVER_IP}${NC}"
-    echo -e "  Become root:    ${CYAN}su root${NC}"
-    echo -e "  Password auth:  ${RED}disabled${NC}"
-    echo ""
-    echo -e "  ${BOLD}Server Sync Key${NC} (for cipi sync push between servers)"
-    echo -e "  ${DIM}$(cat /home/cipi/.ssh/id_ed25519.pub 2>/dev/null || echo 'N/A')${NC}"
-    echo ""
-    echo -e "  ${YELLOW}${BOLD}⚠ SAVE THESE CREDENTIALS!${NC}"
-    echo ""
-    echo -e "  ${BOLD}Getting Started${NC}"
+    echo -e "  ${BOLD}Getting started${NC}"
+    echo -e "  Log in:         ${CYAN}ssh cipi@${SERVER_IP}${NC}"
     echo -e "  Server status:  ${CYAN}cipi status${NC}"
+    echo -e "  Create an app:  ${CYAN}cipi app create${NC}"
     echo -e "  All commands:   ${CYAN}cipi help${NC}"
-    echo -e "  Create app:     ${CYAN}cipi app create${NC}"
+    echo -e "  ${DIM}Server sync key (cipi sync push): /home/cipi/.ssh/id_ed25519.pub${NC}"
     echo ""
-    _final_summary_panel_guide "$SERVER_IP"
+    _setup_optional_wizard
+}
+
+# Nothing goes on until the credentials are saved: y, or the question again.
+_confirm_credentials_saved() {
+    if ! _has_tty; then
+        echo -e "  ${DIM}No terminal — not asking. They are in /etc/cipi (encrypted): sudo cipi credentials${NC}"
+        return 0
+    fi
+    local a
+    while true; do
+        echo -en "  ${BOLD}Have you saved these credentials in a password manager?${NC} [y/N] "
+        read -r a < /dev/tty
+        [[ "$a" =~ ^[Yy]$ ]] && break
+        echo -e "  ${YELLOW}Please save them first — copy them into your password manager, then type y.${NC}"
+    done
+    echo -e "  ${GREEN}✓ Credentials saved${NC}"
+}
+
+# The optional layers, one yes/no each, instead of a page of commands under
+# the credentials. Each runs the normal command with stdin on the terminal:
+# this script's own stdin is the pipe from wget.
+_setup_optional_wizard() {
+    echo -e "  ${BOLD}Optional — a browser instead of SSH${NC}"
+    echo -e "  ${DIM}Two layers, each a yes/no now or one command later. Both need a DNS A record of their own → ${SERVER_IP}.${NC}"
+    echo ""
+    if _has_tty; then
+        echo -e "  ${BOLD}Panel API${NC} ${DIM}— REST + MCP for the web GUI, cipi-cli, CI and AI agents (~2 min)${NC}"
+        if _ask_yn "Install the panel API now?"; then
+            _setup_run_panel api
+        fi
+        echo ""
+        echo -e "  ${BOLD}Web GUI${NC} ${DIM}— the control panel; it manages this server (and others) through their API${NC}"
+        if _ask_yn "Install the web GUI on this server now?"; then
+            _setup_run_panel gui
+        fi
+        echo ""
+    fi
+    echo -e "  ${BOLD}Later, whenever you want${NC}"
+    echo -e "  ${CYAN}cipi api api.yourdomain.com${NC}      panel API — DNS check, install, HTTPS and a token in one go"
+    echo -e "  ${CYAN}cipi gui panel.yourdomain.com${NC}    web GUI — DNS check, install and HTTPS in one go"
+    echo -e "  ${CYAN}cipi db install pgsql${NC}            PostgreSQL next to MariaDB"
+    echo -e "  ${CYAN}cipi search install${NC}              Meilisearch for Laravel Scout"
+    echo -e "  ${DIM}Docs: https://cipi.sh/docs · GUI: https://github.com/cipi-sh/gui${NC}"
+    echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 }
 
-# Post-setup guide: optional Panel API and Web GUI (same server or remote).
-_final_summary_panel_guide() {
-    local server_ip="${1:-}"
-
-    echo -e "  ${BOLD}Optional — Panel API & Web GUI${NC}"
-    echo -e "  ${DIM}Manage apps from a browser instead of SSH. Two optional layers:${NC}"
-    echo -e "  ${DIM}  • Panel API  — REST endpoints + tokens for scripts and the GUI${NC}"
-    echo -e "  ${DIM}  • Web GUI    — multi-server control panel (needs API on each server)${NC}"
+# Ask the domain, run `cipi api|gui <domain>` (it checks the DNS first and
+# stops when the name does not point here), offer another go on failure.
+_setup_run_panel() {
+    local what="$1" domain
+    while true; do
+        echo -en "  ${BOLD}Domain for the ${what}${NC} ${DIM}(A record → ${SERVER_IP}; empty = skip)${NC}: "
+        read -r domain < /dev/tty
+        domain=$(printf '%s' "$domain" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+        if [[ -z "$domain" ]]; then
+            echo -e "  ${DIM}Skipped. Later: cipi ${what} <domain>${NC}"
+            return 0
+        fi
+        [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$ ]] && break
+        echo -e "  ${RED}Not a valid domain${NC}"
+    done
     echo ""
-    echo -e "  ${BOLD}1. Panel API${NC} ${DIM}(install first — ~2 min)${NC}"
-    echo -e "  Point a DNS A record to ${CYAN}${server_ip}${NC}, then run:"
-    echo -e "    ${CYAN}cipi api api.yourdomain.com${NC}"
-    echo -e "  ${DIM}Provisions Laravel, PHP-FPM, Nginx and a queue worker automatically.${NC}"
+    if /usr/local/bin/cipi "$what" "$domain" < /dev/tty; then
+        return 0
+    fi
     echo ""
-    echo -e "  ${BOLD}2. HTTPS for the API${NC}"
-    echo -e "    ${CYAN}cipi api ssl${NC}"
-    echo ""
-    echo -e "  ${BOLD}3. API token${NC} ${DIM}(for the GUI, CI, or cipi-cli)${NC}"
-    echo -e "    ${CYAN}cipi api token create${NC}"
-    echo -e "  ${DIM}Pick abilities from the menu; save the token — it is shown once.${NC}"
-    echo ""
-    echo -e "  ${BOLD}4. Web GUI${NC} ${DIM}(optional — same server or another machine)${NC}"
-    echo -e "  Point another DNS name to the GUI host, then:"
-    echo -e "    ${CYAN}cipi gui panel.yourdomain.com${NC}"
-    echo -e "  ${DIM}Prompts for admin email/password; registers servers with API tokens.${NC}"
-    echo ""
-    echo -e "  ${BOLD}5. HTTPS for the GUI${NC}"
-    echo -e "    ${CYAN}cipi gui ssl${NC}"
-    echo ""
-    echo -e "  ${DIM}After API setup: https://api.yourdomain.com/docs · GUI repo: https://github.com/cipi-sh/gui${NC}"
-    echo ""
+    echo -e "  ${YELLOW}The ${what} setup did not complete — see above.${NC} Later: ${CYAN}cipi ${what} ${domain}${NC}"
+    if _ask_yn "Try again?"; then
+        _setup_run_panel "$what"
+    fi
+    return 0
 }
 
 # ── MAIN ──────────────────────────────────────────────────────
@@ -1394,7 +1529,8 @@ main() {
 
     show_logo
     check_requirements
-    collect_ssh_key
+    collect_ssh_keys
+    confirm_plan
     install_basics
     setup_swap
     setup_system

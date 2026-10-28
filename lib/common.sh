@@ -620,6 +620,103 @@ panel_domain_check() {
     return 0
 }
 
+# ── Where a panel domain points ──────────────────────────────
+
+# This server's public IPv4 as the outside sees it, cached for the run; empty
+# when it cannot be found (no egress, an answer that is not an address).
+server_public_ip() {
+    if [[ -z "${_CIPI_PUBLIC_IP+x}" ]]; then
+        _CIPI_PUBLIC_IP=$(curl -s --connect-timeout 3 --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]') || _CIPI_PUBLIC_IP=""
+        [[ "$_CIPI_PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || _CIPI_PUBLIC_IP=""
+    fi
+    printf '%s' "$_CIPI_PUBLIC_IP"
+}
+
+# The addresses on this machine's interfaces, one per line (a server with a
+# public address of its own, IPv6 included).
+server_local_ips() { hostname -I 2>/dev/null | tr ' ' '\n' | grep . || true; }
+
+# The addresses a name resolves to, one per line: A and AAAA, after CNAMEs,
+# through the resolver this server uses.
+# getent exits 2 on a name with no record: with pipefail that is the
+# pipeline's status, and in a $(…) assignment under set -e it ended the
+# command with no message — hence the || true.
+dns_resolve_ips() { getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u || true; }
+
+# Cloudflare's proxy ranges (www.cloudflare.com/ips). A name on the orange
+# cloud resolves to these and never to the origin; the DNS check accepts
+# them, since Let's Encrypt's HTTP-01 is answered through the proxy.
+ip_is_cloudflare() {
+    local ip="$1" a b c d n base bits cidr
+    case "$ip" in
+        *:*)
+            case "$(printf '%s' "$ip" | tr '[:upper:]' '[:lower:]')" in
+                2400:cb00:*|2606:4700:*|2803:f800:*|2405:b500:*|2405:8100:*|2c0f:f248:*|2a06:98c[0-7]:*) return 0 ;;
+            esac
+            return 1 ;;
+    esac
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r a b c d <<< "$ip"
+    n=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+    for cidr in 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 \
+                108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 \
+                162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22; do
+        IFS=. read -r a b c d <<< "${cidr%/*}"
+        base=$(( (a<<24) | (b<<16) | (c<<8) | d ))
+        bits=${cidr#*/}
+        (( (n >> (32 - bits)) == (base >> (32 - bits)) )) && return 0
+    done
+    return 1
+}
+
+# The API and the GUI end their setup with a certificate request, and a name
+# that does not point here fails it — the install done, the panel on http://,
+# and nothing said about why until certbot's error. So the check comes first:
+# $1 resolves to this server (or to the Cloudflare proxy) → 0; nothing, or
+# another address → 1 with the record to create. --skip-dns-check (or $2 =
+# true) turns it into a note, for a NAT or a proxy Cipi cannot see through.
+panel_dns_check() {
+    local dom="$1" skip="${2:-${ARG_skip_dns_check:-}}"
+    if [[ "$skip" == "true" ]]; then
+        info "DNS check skipped (--skip-dns-check): the certificate request fails if ${dom} does not reach this server"
+        return 0
+    fi
+    local pub resolved mine ip ok=false cf=false
+    pub=$(server_public_ip)
+    resolved=$(dns_resolve_ips "$dom")
+    mine=$(printf '%s\n%s\n' "$pub" "$(server_local_ips)" | grep . | sort -u || true)
+    local shown; shown=$(paste -sd, - <<< "$resolved")
+    if [[ -z "$resolved" ]]; then
+        error "DNS: ${dom} does not resolve yet"
+        echo -e "  ${DIM}Create an A record for ${dom} → ${pub:-the public IP of this server}, wait for it to propagate${NC}"
+        echo -e "  ${DIM}(check: getent ahosts ${dom}), then run the command again.${NC}"
+        echo -e "  ${DIM}Behind a proxy or NAT Cipi cannot see through: add --skip-dns-check${NC}"
+        return 1
+    fi
+    while IFS= read -r ip; do
+        [[ -n "$ip" ]] || continue
+        grep -Fxq "$ip" <<< "$mine" && ok=true
+        ip_is_cloudflare "$ip" && cf=true
+    done <<< "$resolved"
+    if [[ "$ok" == true ]]; then
+        success "DNS: ${dom} → ${shown}"
+        return 0
+    fi
+    if [[ "$cf" == true ]]; then
+        success "DNS: ${dom} → Cloudflare proxy${pub:+ (origin ${pub})}"
+        return 0
+    fi
+    if [[ -z "$mine" ]]; then
+        warn "DNS: ${dom} → ${shown} — this server's own address is unknown, not verified"
+        return 0
+    fi
+    local me="${pub:-$(head -1 <<< "$mine")}"
+    error "DNS: ${dom} points to ${shown}, this server is ${me}"
+    echo -e "  ${DIM}Change the A record of ${dom} to ${me}, wait for it to propagate (check: getent ahosts ${dom}),${NC}"
+    echo -e "  ${DIM}then run the command again. Behind a proxy or NAT Cipi cannot see through: add --skip-dns-check${NC}"
+    return 1
+}
+
 # Let's Encrypt lineages issued for a panel domain: <domain>, plus the
 # <domain>-NNNN copies certbot makes when that name is already taken.
 panel_cert_names() {
@@ -977,6 +1074,11 @@ get_db_root_password() { vault_read server.json | jq -r '.db_root_password'; }
 
 confirm() {
     echo -e -n "${YELLOW}${1:-Are you sure?} [y/N]: ${NC}"; read -r r; [[ "$r" =~ ^[Yy]$ ]]
+}
+
+# The same question with yes as the default: Enter goes on, n stops.
+confirm_yes() {
+    echo -e -n "${YELLOW}${1:-Continue?} [Y/n]: ${NC}"; read -r r; [[ ! "$r" =~ ^[Nn] ]]
 }
 
 read_input() {

@@ -332,9 +332,17 @@ _api_token_select_abilities() {
 
 # ── API SETUP (cipi api [domain]) ──────────────────────────────
 
+# cipi api <domain> [--no-ssl] [--no-token] [--skip-dns-check]
+# From nothing to a working API in one command: the DNS check first (a name
+# that does not point here stops it before anything is installed), the
+# install, the certificate, then a token offered on a terminal. Each piece
+# stays available on its own: cipi api ssl, cipi api token create.
 api_setup() {
     local domain="${1:-}"
-    [[ -z "$domain" ]] && { error "Usage: cipi api <domain>"; exit 1; }
+    shift || true
+    unset ARG_no_ssl ARG_no_token ARG_skip_dns_check
+    parse_args "$@"
+    [[ -z "$domain" || "$domain" == --* ]] && { error "Usage: cipi api <domain> [--no-ssl] [--no-token] [--skip-dns-check]"; exit 1; }
     validate_domain "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
 
     # Re-running setup on another domain used to rewrite the vhost without its
@@ -347,6 +355,9 @@ api_setup() {
         exit 1
     fi
     panel_domain_check "$domain" api || exit 1
+    # The certificate is requested at the end of this command: a name that
+    # does not point here yet stops it now, with nothing installed.
+    [[ "${ARG_no_ssl:-}" == "true" ]] || panel_dns_check "$domain" || exit 1
 
     echo ""; info "Configuring Cipi API at ${domain}..."; echo ""
 
@@ -407,19 +418,51 @@ api_setup() {
         "Cipi API configured: ${domain} on $(hostname)" \
         "The panel API was configured.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
         api_configure
+
+    local ssl_ok=false
+    if [[ "${ARG_no_ssl:-}" != "true" ]]; then
+        echo ""
+        _api_ssl_issue "$domain" && ssl_ok=true
+    fi
+    local scheme=https
+    [[ "$ssl_ok" == "true" ]] || scheme=http
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "  ${GREEN}${BOLD}Cipi API configured${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "  Domain:     ${CYAN}https://${domain}${NC}"
-    echo -e "  API:        ${CYAN}https://${domain}/api${NC}"
-    echo -e "  Docs:       ${CYAN}https://${domain}/docs${NC}"
-    echo -e "  MCP:        ${CYAN}https://${domain}/mcp${NC}"
-    echo ""
-    echo -e "  ${BOLD}Next:${NC} cipi api ssl  (to install SSL certificate)"
-    echo -e "        cipi api token create  (to create API token)"
+    echo -e "  Domain:     ${CYAN}${scheme}://${domain}${NC}"
+    echo -e "  API:        ${CYAN}${scheme}://${domain}/api${NC}"
+    echo -e "  Docs:       ${CYAN}${scheme}://${domain}/docs${NC}"
+    echo -e "  MCP:        ${CYAN}${scheme}://${domain}/mcp${NC}"
+    if [[ "$ssl_ok" != "true" ]]; then
+        echo ""
+        if [[ "${ARG_no_ssl:-}" == "true" ]]; then
+            echo -e "  ${YELLOW}No certificate (--no-ssl).${NC} When ${domain} points here: ${CYAN}cipi api ssl${NC}"
+        else
+            echo -e "  ${YELLOW}No certificate yet.${NC} Fix what is reported above, then: ${CYAN}cipi api ssl${NC}"
+        fi
+    fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
+
+    # A token is what every client of this server presents: the GUI panel,
+    # cipi-cli, CI, an MCP client. Offered here, on a terminal, so a first
+    # install ends ready to use; a script (no terminal) and --no-token get
+    # the command instead.
+    if [[ "${ARG_no_token:-}" != "true" && -t 0 ]]; then
+        echo -e "  ${DIM}An API token is what the GUI panel, cipi-cli, CI and MCP clients use to reach this server.${NC}"
+        if confirm_yes "Create an API token now?"; then
+            api_token_create
+        else
+            echo -e "  ${DIM}Later: cipi api token create${NC}"
+            echo ""
+        fi
+    else
+        echo -e "  ${BOLD}Next:${NC} cipi api token create  (a token for the GUI, cipi-cli or CI)"
+        echo ""
+    fi
+    [[ "$ssl_ok" == "true" || "${ARG_no_ssl:-}" == "true" ]] || exit 1
 }
 
 _api_ensure_laravel_app() {
@@ -1112,15 +1155,12 @@ _api_show_versions() {
 
 # ── API SSL (cipi api ssl) ─────────────────────────────────────
 
-api_ssl() {
-    [[ ! -f "${CIPI_API_CONFIG}" ]] && { error "API not configured. Run: cipi api <domain>"; exit 1; }
-    local domain; domain=$(vault_read api.json | jq -r '.domain')
-    [[ -z "$domain" || "$domain" == "null" ]] && { error "No domain in api.json"; exit 1; }
-
-    echo ""
+# Request (or re-install) the certificate of the API domain and switch the
+# vhost to HTTPS. Returns 1 when certbot fails; the DNS check is the caller's.
+_api_ssl_issue() {
+    local domain="$1"
     step "Installing SSL for ${domain}..."
     echo ""
-
     if certbot --nginx -d "${domain}" \
         --cert-name "${domain}" \
         --non-interactive \
@@ -1133,10 +1173,27 @@ api_ssl() {
             "Cipi API SSL installed: ${domain} on $(hostname)" \
             "SSL was installed for the panel API.\n\nServer: $(hostname)\nDomain: ${domain}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
             api_ssl
-        echo ""; success "SSL installed for ${domain}"; echo ""
-    else
-        echo ""; error "SSL failed. Check DNS, port 80, and domain."; exit 1
+        echo ""; success "SSL installed for ${domain}"
+        return 0
     fi
+    echo ""
+    error "SSL failed for ${domain}. Check: the name points here, port 80 is open, no Let's Encrypt rate limit."
+    echo -e "  ${DIM}Then: cipi api ssl${NC}"
+    return 1
+}
+
+# cipi api ssl [--skip-dns-check]
+api_ssl() {
+    unset ARG_skip_dns_check
+    parse_args "$@"
+    [[ ! -f "${CIPI_API_CONFIG}" ]] && { error "API not configured. Run: cipi api <domain>"; exit 1; }
+    local domain; domain=$(vault_read api.json | jq -r '.domain')
+    [[ -z "$domain" || "$domain" == "null" ]] && { error "No domain in api.json"; exit 1; }
+
+    echo ""
+    panel_dns_check "$domain" || exit 1
+    _api_ssl_issue "$domain" || exit 1
+    echo ""
 }
 
 # ── API MOVE (cipi api move <domain>) ─────────────────────────
@@ -1155,9 +1212,9 @@ _api_set_app_url() {
 api_move() {
     local new="${1:-}"
     shift || true
-    unset ARG_no_ssl
+    unset ARG_no_ssl ARG_skip_dns_check
     parse_args "$@"
-    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi api move <new-domain> [--no-ssl]"; exit 1; }
+    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi api move <new-domain> [--no-ssl] [--skip-dns-check]"; exit 1; }
     validate_domain "$new" || { error "Invalid domain '${new}'"; exit 1; }
     [[ -f "${CIPI_API_CONFIG}" && -f "${CIPI_API_ROOT}/artisan" ]] \
         || { error "API not configured. Run: cipi api <domain>"; exit 1; }
@@ -1166,6 +1223,9 @@ api_move() {
     old=$(panel_domain api) || old=""
     [[ "$new" == "$old" ]] && { info "The API is already at ${new}"; return 0; }
     panel_domain_check "$new" api || exit 1
+    # The new name must already point here, or the move ends on http://
+    # with the old certificate gone. --no-ssl is a move staged on purpose.
+    [[ "${ARG_no_ssl:-}" == "true" ]] || panel_dns_check "$new" || exit 1
     cfg=$(vault_read api.json | jq -c --arg d "$new" '.domain = $d') && [[ -n "$cfg" ]] \
         || { error "Cannot read ${CIPI_API_CONFIG}"; exit 1; }
 
@@ -1202,7 +1262,7 @@ api_move() {
 
     local ssl_ok=false
     if [[ "${ARG_no_ssl:-}" != "true" ]]; then
-        ( api_ssl ) && ssl_ok=true
+        _api_ssl_issue "$new" && ssl_ok=true
     fi
 
     log_action "API MOVED: ${old:-?} → ${new}"
@@ -1796,8 +1856,8 @@ api_fix_permissions() {
 api_command() {
     local sub="${1:-}"; shift || true
     case "$sub" in
-        "")      error "Usage: cipi api <domain>"; exit 1 ;;
-        ssl)     api_ssl ;;
+        "")      error "Usage: cipi api <domain> [--no-ssl] [--no-token] [--skip-dns-check]"; exit 1 ;;
+        ssl)     api_ssl "$@" ;;
         move)    api_move "$@" ;;
         remove|uninstall) api_remove "$@" ;;
         update)  api_update ;;
@@ -1808,9 +1868,9 @@ api_command() {
         ip-whitelist|ipwhitelist|whitelist) _api_ip_whitelist_command "$@" ;;
         *)
             if validate_domain "$sub" 2>/dev/null; then
-                api_setup "$sub"
+                api_setup "$sub" "$@"
             else
-                error "Unknown: $sub"; echo "Use: <domain> | ssl | move <domain> | remove | update | upgrade | status | fix-permissions | token list|create|revoke | ip-whitelist"; exit 1
+                error "Unknown: $sub"; echo "Use: <domain> [--no-ssl --no-token --skip-dns-check] | ssl | move <domain> | remove | update | upgrade | status | fix-permissions | token list|create|revoke | ip-whitelist"; exit 1
             fi ;;
     esac
 }

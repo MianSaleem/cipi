@@ -554,6 +554,8 @@ _search_enable() {
     if _search_app_enabled "$app"; then
         info "Search is already enabled for '${app}' (prefix $(_search_app_prefix "$app"))"
         echo -e "  New key: ${CYAN}cipi search key rotate ${app}${NC}"
+        # apps.json is what cipi yml plan reads: keep it in step with search.json.
+        [[ "$(app_get "$app" search)" == "true" ]] || app_set "$app" search "true"
         return 0
     fi
 

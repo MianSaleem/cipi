@@ -1894,8 +1894,19 @@ _yml_build_plan() {
     # ── php.ini overrides (app scope only)
     if echo "$_YML_DATA" | jq -e 'has("app") and (.app | has("ini"))' &>/dev/null; then
         local k v cur
+        # shellcheck source=/dev/null
+        declare -f _ini_normalize_value >/dev/null 2>&1 || source "${CIPI_LIB}/ini.sh"
         while IFS=$'\t' read -r k v; do
             [[ -n "$k" ]] || continue
+            # The value is compared as cipi ini stores it (On/Off for flags),
+            # so `display_errors: 1` matches a stored "On". A value cipi ini
+            # would refuse blocks the plan here, where it can be read, instead
+            # of ending the apply halfway.
+            if ! ( _ini_validate_value "$k" "$v" ) >/dev/null 2>&1; then
+                _YML_BLOCKERS+=("app.ini.${k}: '${v}' is not a value cipi ini accepts — see: cipi ini keys")
+                continue
+            fi
+            v=$(_ini_normalize_value "$k" "$v")
             cur=$(vault_read apps.json | jq -r --arg a "$app" --arg k "$k" '.[$a].ini[$k] // empty')
             [[ "$cur" == "$v" ]] && continue
             _YML_ACTIONS+=("ini|${k}=${v}|php.ini ${k} = ${v}${cur:+ (was ${cur})}")
@@ -1991,12 +2002,17 @@ _yml_build_plan() {
             if [[ "$cur_horizon" == "true" && "$want_horizon" != "false" ]]; then
                 _YML_BLOCKERS+=("queue workers are declared but Horizon is enabled — set 'workers.horizon: false' as well")
             else
-                local conf="/etc/supervisor/conf.d/${app}.conf" q procs tries timeout cur_progs
+                local conf="/etc/supervisor/conf.d/${app}.conf" q procs tries timeout cur_progs cur_workers
                 cur_progs=$(grep -oE "^\[program:${app}-worker-[^]]+\]" "$conf" 2>/dev/null \
                     | sed "s/^\[program:${app}-worker-//; s/\]$//" || true)
+                # processes, tries and timeout as the program carries them: a
+                # worker that already matches is not an action (until 5.8.2
+                # every declared queue was an "update" on every plan).
+                cur_workers=$(_yml_read_workers "$app")
                 while IFS=$'\t' read -r q procs tries timeout; do
                     [[ -n "$q" ]] || continue
                     if grep -Fxq "$q" <<< "$cur_progs"; then
+                        grep -Fxq "${q}"$'\t'"${procs}"$'\t'"${tries}"$'\t'"${timeout}" <<< "$cur_workers" && continue
                         _YML_ACTIONS+=("worker-sync|${q}|${procs}|${tries}|${timeout}|update queue worker ${q} (${procs} process(es))")
                     else
                         _YML_ACTIONS+=("worker-add|${q}|${procs}|${tries}|${timeout}|add queue worker ${q} (${procs} process(es))")
@@ -2017,7 +2033,8 @@ _yml_build_plan() {
     want_sched=$(echo "$_YML_DATA" | jq -r 'if has("schedule") then (.schedule|tostring) else "" end')
     if [[ -n "$want_sched" && "$is_custom_app" != true ]]; then
         cur_sched="true"
-        crontab -u "$app" -l 2>/dev/null | grep -q '^\* \* \* \* \*.*schedule:run' || cur_sched="false"
+        # The managed lines (# cipi-yml) are the file's own crons, not the scheduler.
+        crontab -u "$app" -l 2>/dev/null | grep -v '# cipi-yml$' | grep -q '^\* \* \* \* \*.*schedule:run' || cur_sched="false"
         [[ "$want_sched" != "$cur_sched" ]] \
             && _YML_ACTIONS+=("schedule|${want_sched}|turn Laravel scheduler ${want_sched/true/on}${want_sched/false/off}")
     fi
@@ -2254,6 +2271,11 @@ _yml_build_plan() {
         while IFS= read -r pname; do
             [[ -n "$pname" ]] || continue
             if _bk_profile_exists "$pname"; then
+                # Only when the stored profile differs from what the file asks.
+                local bk_want="" bk_cur
+                bk_want=$(_yml_backup_profile_desired "$pname" 2>/dev/null | jq -S -c . 2>/dev/null) || bk_want=""
+                bk_cur=$(_bk_profile_json "$pname" | jq -S -c . 2>/dev/null)
+                [[ -n "$bk_want" && "$bk_want" == "$bk_cur" ]] && continue
                 _YML_ACTIONS+=("backup-profile|${pname}|update backup profile ${pname}")
             else
                 _YML_ACTIONS+=("backup-profile|${pname}|create backup profile ${pname} ($(_yml_backup_destinations "$pname" | paste -sd, -))")
@@ -2320,7 +2342,26 @@ _yml_plan_crons() {
         return 0
     fi
 
-    local php_ver wd lines="" entry sched run cmd
+    local lines current n
+    lines=$(_yml_crons_lines "$app")
+
+    current=$(crontab -u "$app" -l 2>/dev/null | grep '# cipi-yml$' || true)
+    [[ "$lines" == "$current" ]] && return 0
+    _YML_CRONS_WANT="$lines"
+    _YML_CRONS_SYNC=true
+    n=$(echo "$_YML_DATA" | jq '.crons | length')
+    if (( n == 0 )); then
+        _YML_ACTIONS+=("crons||remove the managed cron entries")
+    else
+        _YML_ACTIONS+=("crons||scheduled commands — ${n} managed cron entr$( ((n==1)) && echo y || echo ies )")
+    fi
+}
+
+# The crontab lines the file asks for, with the app's PHP version as it is
+# when this runs: the plan builds them to compare, apply builds them again to
+# write, after an earlier `php` action may have changed the version.
+_yml_crons_lines() {
+    local app="$1" php_ver wd lines="" entry sched run cmd
     php_ver=$(app_get "$app" php)
     wd=$(_yml_post_deploy_workdir "$app")
     while IFS= read -r entry; do
@@ -2339,19 +2380,7 @@ _yml_plan_crons() {
         fi
         lines+="${sched} cd ${wd} && env PATH=/usr/local/bin:/usr/bin:/bin CI=true ${cmd} >> /home/${app}/logs/cron.log 2>&1 # cipi-yml"$'\n'
     done < <(echo "$_YML_DATA" | jq -c '.crons[]?')
-    lines="${lines%$'\n'}"
-
-    local current n
-    current=$(crontab -u "$app" -l 2>/dev/null | grep '# cipi-yml$' || true)
-    [[ "$lines" == "$current" ]] && return 0
-    _YML_CRONS_WANT="$lines"
-    _YML_CRONS_SYNC=true
-    n=$(echo "$_YML_DATA" | jq '.crons | length')
-    if (( n == 0 )); then
-        _YML_ACTIONS+=("crons||remove the managed cron entries")
-    else
-        _YML_ACTIONS+=("crons||scheduled commands — ${n} managed cron entr$( ((n==1)) && echo y || echo ies )")
-    fi
+    printf '%s' "${lines%$'\n'}"
 }
 
 # `node:` is not reconciled by apply: the recipe of the next deploy reads it from
@@ -2888,7 +2917,9 @@ _yml_apply_action() {
         ini)
             local pair="${rest%%|*}"
             step "php.ini ${pair}"
-            _ini_set "$pair" "--app=${app}" >/dev/null
+            # In a subshell: _ini_set exits on a refused value, and that must
+            # fail this action, not end the apply before the remaining ones.
+            ( _ini_set "$pair" "--app=${app}" >/dev/null ) || return 1
             ;;
         ini-unset)
             local key="${rest%%|*}"
@@ -2958,6 +2989,8 @@ _yml_apply_action() {
             if [[ "$h_rb" == "true" ]]; then hargs+=( "--rollback-on-unhealthy" ); else hargs+=( "--no-rollback-on-unhealthy" ); fi
             declare -f _health_set >/dev/null 2>&1 || source "${CIPI_LIB}/health.sh"
             _health_set "$app" "${hargs[@]}" >/dev/null
+            # _health_set only ever sets a grace; the file not naming one means none.
+            [[ -n "$h_grace" ]] || app_unset "$app" health_grace
             ;;
         health-unset)
             step "healthcheck removed"
@@ -3111,11 +3144,14 @@ _yml_apply_action() {
             ;;
         crons)
             step "scheduled commands (crontab)"
-            local cron_keep
+            local cron_keep cron_want
             cron_keep=$(crontab -u "$app" -l 2>/dev/null | grep -v '# cipi-yml$' || true)
+            # Built again now, not taken from the plan: a `php` action earlier
+            # in this apply changed the version the lines carry.
+            cron_want=$(_yml_crons_lines "$app")
             {
                 [[ -n "$cron_keep" ]] && printf '%s\n' "$cron_keep"
-                [[ -n "$_YML_CRONS_WANT" ]] && printf '%s\n' "$_YML_CRONS_WANT"
+                [[ -n "$cron_want" ]] && printf '%s\n' "$cron_want"
             } | crontab -u "$app" - || return 1
             app_set_json "$app" yml_crons "$(echo "$_YML_DATA" | jq -c '.crons')"
             log_action "YML CRONS: ${app} entries=$(echo "$_YML_DATA" | jq '.crons | length')"
@@ -3197,7 +3233,11 @@ _yml_create_database() {
     return 0
 }
 
-_yml_apply_backup_profile() {
+# The profile JSON the file asks for, built on what the server stores (a
+# declared key wins, the rest stays). Pure: nothing is written. The plan
+# compares it with the stored profile — until 5.8.2 every declared profile
+# that existed was an "update" on every plan — and apply saves it.
+_yml_backup_profile_desired() {
     local pname="$1"
     local spec; spec=$(echo "$_YML_DATA" | jq -c --arg n "$pname" '.backup.profiles[] | select(.name == $n)')
     [[ -z "$spec" ]] && return 1
@@ -3245,6 +3285,13 @@ _yml_apply_backup_profile() {
         json=$(echo "$json" | jq --arg c "$cron" --argjson i "$(_bk_cron_interval_seconds "$cron")" \
             '.cron = $c | .interval_seconds = $i')
     fi
+
+    printf '%s\n' "$json"
+}
+
+_yml_apply_backup_profile() {
+    local pname="$1" json
+    json=$(_yml_backup_profile_desired "$pname") || return 1
 
     if [[ "$(echo "$json" | jq -r '.encrypt')" == "true" ]]; then
         _bk_key_ensure || return 1

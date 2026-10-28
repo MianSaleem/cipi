@@ -53,9 +53,14 @@ wget -O - https://cipi.sh/setup.sh | bash
 
 The installer asks for the **public** half of an SSH key (`~/.ssh/id_ed25519.pub`
 on your own machine; `ssh-keygen -t ed25519` creates one if you have none — on
-Windows, from PowerShell or WSL). It ends by printing a root password: keep it
-in a password manager. Root is reachable only by logging in as the `cipi` user
-with that key and then running `su root`.
+Windows, from PowerShell or WSL), and for more keys if you have them. It shows
+what it is about to set up and waits for a go. It ends with the credentials it
+generated — root, MariaDB root, Valkey — one block each, and waits until you
+confirm they are in your password manager; then it offers the panel API and the
+web GUI as two yes/no questions. Root is reachable only by logging in as the
+`cipi` user with that key and then running `su root`. Lost the summary?
+`sudo cipi credentials` prints it again, and `cipi credentials export` writes it
+as a CSV any password manager imports.
 
 **2. Create your app** (Laravel by default, or `cipi app create --custom` for a simple deploy):
 
@@ -576,11 +581,11 @@ MCP tools exposed: `health`, `app_info`, `deploy`, `logs`, `db_query`, `artisan`
 
 When you need to manage apps programmatically or integrate with external pipelines, enable the optional API layer with a single command. Bearer tokens, granular permissions, OpenAPI spec available, interactive Swagger docs.
 
-The API runs on a **domain or subdomain of its own**, pointed at the server: not the domain of an app, and not the GUI's. Cipi refuses a domain that an app already uses.
+The API runs on a **domain or subdomain of its own**, pointed at the server first: not the domain of an app, and not the GUI's. `cipi api` checks the DNS before it installs anything and stops, with the record to create, when the name does not point there (`--skip-dns-check` behind a proxy or NAT it cannot see through); Cipi also refuses a domain that an app already uses.
 
 ```bash
-cipi api api.example.com              # install at its own subdomain
-cipi api ssl                          # Let's Encrypt certificate
+cipi api api.example.com              # DNS check, install, certificate, token — one command
+cipi api ssl                          # (re)issue the certificate
 cipi api move api.newdomain.com       # change domain: old certificate out, new one in (--no-ssl to skip)
 cipi api remove                       # uninstall: tokens, jobs, vhost, crons, certificate
 ```
@@ -632,7 +637,9 @@ A self-hosted control panel for operators who prefer a browser over SSH. One log
 
 
 
-Install with **`cipi gui <domain>`** (then `cipi gui ssl`) on a domain or subdomain of its own, e.g. `panel.example.com`: not an app's domain and not the API's. Change it later with **`cipi gui move <domain>`** (certificate included), uninstall with **`cipi gui remove`**. The panel requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
+Install with **`cipi gui <domain>`** — DNS check, admin account and certificate in one go — on a domain or subdomain of its own, e.g. `panel.example.com`: not an app's domain and not the API's. Change it later with **`cipi gui move <domain>`** (certificate included), uninstall with **`cipi gui remove`**. The panel requires **`cipi api`** on each managed server. What is CLI-only by design (installing software, `cipi ssh apps`, firewall thresholds, dropping databases) stays on the CLI.
+
+**Single sign-on** (cipi/gui 4.0.2+): `cipi gui sso set --issuer=… --client-id=… --client-secret=…` turns on OpenID Connect sign-in — Microsoft Entra ID, Google Workspace, Okta, Keycloak — with accounts matched by email (`--domains=` creates them on first sign-in, with no access until granted); `--only` switches passwords off, and `cipi gui sso only off` from the server is the break-glass.
 
 [Docs and screenshots](https://cipi.sh/docs/gui#gui-tour) · [GitHub](https://github.com/cipi-sh/gui)
 

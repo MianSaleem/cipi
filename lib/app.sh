@@ -4083,10 +4083,18 @@ _schedule_crontab_write() {
         schedule_line="# Laravel Scheduler (disabled by cipi schedule off)
 "
     fi
-    cat <<CRON | crontab -u "$app" -
+    # The entries cipi.yml manages (tagged # cipi-yml) survive the rewrite;
+    # until 5.8.2 `cipi schedule on|off` dropped them, and the next
+    # `cipi yml plan` put them back as a change.
+    local managed
+    managed=$(crontab -u "$app" -l 2>/dev/null | grep '# cipi-yml$' || true)
+    {
+        cat <<CRON
 ${schedule_line}# Cipi deploy trigger (written by cipi/agent webhook)
 * * * * * test -f ${home}/.deploy-trigger && mv -f ${home}/.deploy-trigger ${home}/.deploy-trigger.run && /usr/local/bin/cipi-app-deploy ${app} ${php_ver} webhook >/dev/null 2>&1
 CRON
+        [[ -n "$managed" ]] && printf '%s\n' "$managed"
+    } | crontab -u "$app" -
 }
 
 _schedule_set() {

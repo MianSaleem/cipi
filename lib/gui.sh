@@ -116,6 +116,23 @@ _gui_composer_path_repo() {
     (cd "$dir" && composer config prefer-stable true 2>/dev/null) || true
 }
 
+# The version a copy of the package carries (src/Support/Theme.php), or "".
+_gui_pkg_version() {
+    sed -n "s/.*public const VERSION = '\([^']*\)'.*/\1/p" "${1}/src/Support/Theme.php" 2>/dev/null | head -1
+}
+
+# Copy the synced package into vendor/ again. Composer identifies a path
+# repository by the sha1 of its composer.json, not by its files: as long as
+# composer.json is unchanged (cipi/gui's last changed at 3.0.0), `composer
+# require cipi/gui:@dev` sees the same reference, says nothing changed and
+# leaves vendor/cipi/gui as it was — /opt/cipi/cipi-gui moved on every night
+# and every panel stayed where it was. `reinstall` copies regardless.
+_gui_reinstall_package() {
+    local dir="${1:-${CIPI_GUI_ROOT}}"
+    (cd "$dir" && composer reinstall cipi/gui --no-interaction --prefer-dist --no-ansi) \
+        || (cd "$dir" && composer update cipi/gui --no-interaction --prefer-dist --no-ansi)
+}
+
 # If vendor/cipi/gui is still a symlink outside the app root, force a real copy.
 _gui_ensure_vendor_copy() {
     local dir="${1:-${CIPI_GUI_ROOT}}"
@@ -414,6 +431,19 @@ _gui_update_package() {
         warn "Composer require cipi/gui:@dev failed (exit ${composer_rc})"
     fi
     _gui_ensure_vendor_copy "${CIPI_GUI_ROOT}" || true
+    # require is a no-op on an unchanged composer.json (see _gui_reinstall_package).
+    local synced vendored
+    synced=$(_gui_pkg_version /opt/cipi/cipi-gui)
+    step "Composer reinstall cipi/gui${synced:+ ${synced}} (refresh the copy in vendor/)..."
+    if ! _gui_reinstall_package "${CIPI_GUI_ROOT}"; then
+        warn "Composer reinstall cipi/gui failed — the panel may still run the previous version (run: cipi gui update)"
+        [[ "$composer_rc" -ne 0 ]] || composer_rc=1
+    fi
+    vendored=$(_gui_pkg_version "${CIPI_GUI_ROOT}/vendor/cipi/gui")
+    if [[ -n "$synced" && "$vendored" != "$synced" ]]; then
+        warn "vendor/cipi/gui is ${vendored:-unknown}, the synced package is ${synced} — the panel did not update (run: cipi gui update)"
+        [[ "$composer_rc" -ne 0 ]] || composer_rc=1
+    fi
     chown -R www-data:www-data "${CIPI_GUI_ROOT}" 2>/dev/null || true
     ensure_cipi_gui_permissions
     local gui_php
@@ -432,7 +462,7 @@ _gui_update_package() {
     if [[ "$composer_rc" -ne 0 ]]; then
         return "$composer_rc"
     fi
-    success "cipi/gui package updated"
+    success "cipi/gui package updated${vendored:+ (${vendored})}"
     return 0
 }
 
@@ -535,9 +565,16 @@ _gui_is_installed() {
 
 # ── Commands ────────────────────────────────────────────────────
 
+# cipi gui <domain> [--no-ssl] [--skip-dns-check]
+# The DNS check first (a name that does not point here stops it before
+# anything is installed), the admin account, the install, the certificate.
+# cipi gui ssl stays for a certificate issued later.
 gui_setup() {
     local domain="${1:-}"
-    [[ -z "$domain" ]] && { error "Usage: cipi gui <domain>"; exit 1; }
+    shift || true
+    unset ARG_no_ssl ARG_skip_dns_check
+    parse_args "$@"
+    [[ -z "$domain" || "$domain" == --* ]] && { error "Usage: cipi gui <domain> [--no-ssl] [--skip-dns-check]"; exit 1; }
     validate_domain "$domain" || { error "Invalid domain '${domain}'"; exit 1; }
 
     local cur
@@ -548,6 +585,9 @@ gui_setup() {
         exit 1
     fi
     panel_domain_check "$domain" gui || exit 1
+    # The certificate is requested at the end of this command: a name that
+    # does not point here yet stops it now, with nothing installed.
+    [[ "${ARG_no_ssl:-}" == "true" ]] || panel_dns_check "$domain" || exit 1
 
     _gui_cd_safe
 
@@ -593,29 +633,52 @@ gui_setup() {
     success "Cron (schedule:run)"
 
     log_action "GUI CONFIGURED: $domain"
+
+    local ssl_ok=false
+    if [[ "${ARG_no_ssl:-}" != "true" ]]; then
+        echo ""
+        _gui_ssl_issue "$domain" && ssl_ok=true
+    fi
+    local scheme=https
+    [[ "$ssl_ok" == "true" ]] || scheme=http
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e " ${GREEN}${BOLD}Cipi GUI configured${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e " Domain:  ${CYAN}https://${domain}${NC}"
-    echo -e " Login:   ${CYAN}https://${domain}/login${NC}"
-    [[ -n "${_GUI_ADMIN_EMAIL:-}" ]] && echo -e " Admin:   ${CYAN}${_GUI_ADMIN_EMAIL}${NC}"
+    echo -e " Domain:  ${CYAN}${scheme}://${domain}${NC}"
+    echo -e " Login:   ${CYAN}${scheme}://${domain}/login${NC}"
+    [[ -n "${_GUI_ADMIN_EMAIL:-}" ]] && echo -e " Admin:   ${CYAN}${_GUI_ADMIN_EMAIL}${NC}  ${DIM}(the password you just set)${NC}"
+    if [[ "$ssl_ok" != "true" ]]; then
+        echo ""
+        if [[ "${ARG_no_ssl:-}" == "true" ]]; then
+            echo -e " ${YELLOW}No certificate (--no-ssl).${NC} When ${domain} points here: ${CYAN}cipi gui ssl${NC}"
+        else
+            echo -e " ${YELLOW}No certificate yet.${NC} Fix what is reported above, then: ${CYAN}cipi gui ssl${NC}"
+        fi
+    fi
     echo ""
-    echo -e " ${BOLD}Next:${NC}  cipi gui ssl"
-    echo -e "         cipi gui status"
-    echo -e " ${DIM}Use the admin password you set during setup.${NC}"
-    echo -e " ${DIM}Requires cipi api on managed servers + API tokens.${NC}"
+    # The panel manages servers through their API: the first thing to do in
+    # it is to connect one, with a token from that server.
+    local api_dom
+    if api_dom=$(panel_domain api); then
+        echo -e " ${BOLD}Next:${NC}  sign in, then Connections → Add this server:"
+        echo -e "         URL ${CYAN}https://${api_dom}${NC} and a token from ${CYAN}cipi api token create${NC}"
+    else
+        echo -e " ${BOLD}Next:${NC}  on each server to manage: ${CYAN}cipi api <domain>${NC} (it creates the token),"
+        echo -e "         then sign in and add it under Connections."
+    fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
     unset _GUI_ADMIN_PASSWORD
+    [[ "$ssl_ok" == "true" || "${ARG_no_ssl:-}" == "true" ]] || exit 1
 }
 
-gui_ssl() {
-    [[ ! -f "${CIPI_GUI_CONFIG}" ]] && { error "GUI not configured. Run: cipi gui <domain>"; exit 1; }
-    local domain
-    domain=$(vault_read gui.json | jq -r '.domain')
-    [[ -z "$domain" || "$domain" == "null" ]] && { error "Domain not found in config."; exit 1; }
+# Request (or re-install) the certificate of the GUI domain and switch the
+# vhost to HTTPS. Returns 1 when certbot fails; the DNS check is the caller's.
+_gui_ssl_issue() {
+    local domain="$1"
     step "Installing SSL for ${domain}..."
     # Interactive certbot only as a fallback with a terminal (e.g. no ACME
     # account yet); `cipi gui move` and scripts get a plain failure.
@@ -624,10 +687,23 @@ gui_ssl() {
         reload_nginx
         log_action "GUI SSL INSTALLED: $domain"
         success "SSL installed for ${domain}"
-    else
-        error "SSL failed. Check DNS, port 80, and domain."
-        exit 1
+        return 0
     fi
+    error "SSL failed for ${domain}. Check: the name points here, port 80 is open, no Let's Encrypt rate limit."
+    echo -e "  ${DIM}Then: cipi gui ssl${NC}"
+    return 1
+}
+
+# cipi gui ssl [--skip-dns-check]
+gui_ssl() {
+    unset ARG_skip_dns_check
+    parse_args "$@"
+    [[ ! -f "${CIPI_GUI_CONFIG}" ]] && { error "GUI not configured. Run: cipi gui <domain>"; exit 1; }
+    local domain
+    domain=$(vault_read gui.json | jq -r '.domain')
+    [[ -z "$domain" || "$domain" == "null" ]] && { error "Domain not found in config."; exit 1; }
+    panel_dns_check "$domain" || exit 1
+    _gui_ssl_issue "$domain" || exit 1
 }
 
 # Hostname the GUI has on the Cloudflare tunnel (empty when it is not on it).
@@ -660,9 +736,9 @@ _gui_set_app_url() {
 gui_move() {
     local new="${1:-}"
     shift || true
-    unset ARG_no_ssl
+    unset ARG_no_ssl ARG_skip_dns_check
     parse_args "$@"
-    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi gui move <new-domain> [--no-ssl]"; exit 1; }
+    [[ -z "$new" || "$new" == --* ]] && { error "Usage: cipi gui move <new-domain> [--no-ssl] [--skip-dns-check]"; exit 1; }
     validate_domain "$new" || { error "Invalid domain '${new}'"; exit 1; }
     [[ -f "${CIPI_GUI_CONFIG}" && -f "${CIPI_GUI_ROOT}/artisan" ]] \
         || { error "GUI not configured. Run: cipi gui <domain>"; exit 1; }
@@ -672,6 +748,9 @@ gui_move() {
     [[ "$new" == "$old" ]] && { info "The GUI is already at ${new}"; return 0; }
     panel_domain_check "$new" gui || exit 1
     _gui_require_off_tunnel move || exit 1
+    # The new name must already point here, or the move ends on http://
+    # with the old certificate gone. --no-ssl is a move staged on purpose.
+    [[ "${ARG_no_ssl:-}" == "true" ]] || panel_dns_check "$new" || exit 1
     cfg=$(vault_read gui.json | jq -c --arg d "$new" '.domain = $d') && [[ -n "$cfg" ]] \
         || { error "Cannot read ${CIPI_GUI_CONFIG}"; exit 1; }
 
@@ -708,7 +787,7 @@ gui_move() {
 
     local ssl_ok=false
     if [[ "${ARG_no_ssl:-}" != "true" ]]; then
-        ( gui_ssl ) && ssl_ok=true
+        _gui_ssl_issue "$new" && ssl_ok=true
     fi
 
     log_action "GUI MOVED: ${old:-?} → ${new}"
@@ -966,20 +1045,248 @@ gui_reset_user() {
     unset password
 }
 
+# ── SINGLE SIGN-ON (cipi gui sso) ─────────────────────────────
+# The panel signs people in over OpenID Connect when its .env names an
+# issuer (cipi/gui 4.0.2+): Microsoft Entra ID, Google Workspace, Okta,
+# Keycloak, Authentik. The panel's .env is Cipi's to write, so the
+# configuration lives here, and so does the break-glass: `cipi gui sso only
+# off` or `cipi gui sso disable` brings password sign-in back.
+
+GUI_SSO_KEYS="CIPI_GUI_SSO_ISSUER CIPI_GUI_SSO_CLIENT_ID CIPI_GUI_SSO_CLIENT_SECRET CIPI_GUI_SSO_LABEL CIPI_GUI_SSO_DOMAINS CIPI_GUI_SSO_ONLY CIPI_GUI_SSO_SCOPES"
+
+# KEY=value in the panel .env: replaced when present, appended otherwise.
+# The value is double-quoted, so a secret with # or spaces survives Laravel's
+# parser; a " inside it is escaped.
+_gui_env_set() {
+    local envf="${CIPI_GUI_ROOT}/.env" key="$1" val="${2//\"/\\\"}" tmp
+    [[ -f "$envf" ]] || return 1
+    tmp=$(mktemp) || return 1
+    if grep -q "^${key}=" "$envf"; then
+        awk -v k="$key" -v v="$val" 'index($0, k"=") == 1 { print k "=\"" v "\""; next } { print }' "$envf" > "$tmp"
+    else
+        cat "$envf" > "$tmp"
+        printf '%s="%s"\n' "$key" "$val" >> "$tmp"
+    fi
+    cat "$tmp" > "$envf" && rm -f "$tmp"
+}
+
+_gui_env_unset() {
+    local envf="${CIPI_GUI_ROOT}/.env" key="$1" tmp
+    [[ -f "$envf" ]] || return 0
+    tmp=$(mktemp) || return 1
+    grep -v "^${key}=" "$envf" > "$tmp" || true
+    cat "$tmp" > "$envf" && rm -f "$tmp"
+}
+
+# The value of KEY in the panel .env, without the quotes Laravel accepts.
+_gui_env_get() {
+    local envf="${CIPI_GUI_ROOT}/.env" line
+    [[ -f "$envf" ]] || return 0
+    line=$(grep "^${1}=" "$envf" | tail -1 | cut -d= -f2-) || true
+    line="${line%\"}"; line="${line#\"}"
+    line="${line%\'}"; line="${line#\'}"
+    printf '%s' "${line//\\\"/\"}"
+}
+
+# The panel reads the new .env once its config cache is gone; the migration
+# that adds users.sso_subject (cipi/gui 4.0.2) is idempotent, so it runs
+# here too for a panel updated before the column existed.
+_gui_sso_apply() {
+    chown www-data:www-data "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
+    chmod 640 "${CIPI_GUI_ROOT}/.env" 2>/dev/null || true
+    (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan optimize:clear >/dev/null 2>&1) || true
+    (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan migrate --force >/dev/null 2>&1) || true
+}
+
+# Forget the identities linked so far (users.sso_subject). An identity's
+# `sub` is per provider, and Entra ID's is pairwise per app registration:
+# after a new issuer or client id every linked account would be refused as
+# "linked to another identity". Everyone links again at the next sign-in.
+_gui_sso_reset_links() {
+    (cd "${CIPI_GUI_ROOT}" && sudo -u www-data php artisan tinker --no-interaction \
+        --execute="DB::table('users')->whereNotNull('sso_subject')->update(['sso_subject' => null]);" >/dev/null 2>&1) || true
+}
+
+_gui_sso_redirect_uri() {
+    local d; d=$(panel_domain gui) || d="<gui-domain>"
+    printf 'https://%s/auth/sso/callback' "$d"
+}
+
+# The button text the panel derives from the issuer when none is given.
+_gui_sso_default_label() {
+    case "$1" in
+        *login.microsoftonline.com*) echo "Microsoft Entra ID" ;;
+        *accounts.google.com*)       echo "Google" ;;
+        *okta.com*)                  echo "Okta" ;;
+        *)                           echo "SSO" ;;
+    esac
+}
+
+_gui_sso_require_app() {
+    [[ -f "${CIPI_GUI_ROOT}/artisan" && -f "${CIPI_GUI_ROOT}/.env" ]] \
+        || { error "GUI not configured. Run: cipi gui <domain>"; exit 1; }
+}
+
+# cipi gui sso set --issuer=URL --client-id=ID [--client-secret=SECRET] [--label=TEXT] [--domains=a.com,b.com] [--only] [--scopes=...]
+gui_sso_set() {
+    _gui_sso_require_app
+    unset ARG_issuer ARG_client_id ARG_client_secret ARG_label ARG_domains ARG_only ARG_scopes
+    parse_args "$@"
+    local issuer="${ARG_issuer:-}" cid="${ARG_client_id:-}" secret="${ARG_client_secret:-}"
+    [[ -n "$issuer" && -n "$cid" ]] || {
+        error "Usage: cipi gui sso set --issuer=<url> --client-id=<id> [--client-secret=<secret>] [--label=<text>] [--domains=<a.com,b.com>] [--only] [--scopes=<list>]"
+        echo -e "  ${DIM}Entra ID: --issuer=https://login.microsoftonline.com/<tenant-id>/v2.0  (the tenant id, not common)${NC}"
+        echo -e "  ${DIM}Google:   --issuer=https://accounts.google.com${NC}"
+        exit 1
+    }
+    issuer="${issuer%/}"
+    [[ "$issuer" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[^[:space:]]*)?$ ]] || { error "The issuer must be an https:// URL (the one whose /.well-known/openid-configuration answers)"; exit 1; }
+    if [[ -n "${ARG_domains:-}" ]]; then
+        local d
+        for d in ${ARG_domains//,/ }; do
+            validate_domain "$d" || { error "Invalid domain in --domains: '${d}'"; exit 1; }
+        done
+    fi
+    if [[ -z "$secret" ]]; then
+        secret=$(_gui_env_get CIPI_GUI_SSO_CLIENT_SECRET)
+        if [[ -z "$secret" ]]; then
+            if [[ -t 0 || -r /dev/tty ]]; then
+                _gui_read_password "Client secret" secret
+            fi
+            [[ -n "$secret" ]] || { error "A client secret is needed: --client-secret=<secret>, or type it at the prompt"; exit 1; }
+        fi
+    fi
+
+    local prev_issuer prev_cid relink=false
+    prev_issuer=$(_gui_env_get CIPI_GUI_SSO_ISSUER); prev_cid=$(_gui_env_get CIPI_GUI_SSO_CLIENT_ID)
+    [[ -n "$prev_issuer" && ( "$prev_issuer" != "$issuer" || "$prev_cid" != "$cid" ) ]] && relink=true
+
+    step "Writing the SSO settings to the panel .env..."
+    _gui_env_set CIPI_GUI_SSO_ISSUER "$issuer" || { error "Cannot write ${CIPI_GUI_ROOT}/.env"; exit 1; }
+    _gui_env_set CIPI_GUI_SSO_CLIENT_ID "$cid"
+    _gui_env_set CIPI_GUI_SSO_CLIENT_SECRET "$secret"
+    if [[ -n "${ARG_label:-}" ]]; then _gui_env_set CIPI_GUI_SSO_LABEL "$ARG_label"; else _gui_env_unset CIPI_GUI_SSO_LABEL; fi
+    if [[ -n "${ARG_domains:-}" ]]; then _gui_env_set CIPI_GUI_SSO_DOMAINS "${ARG_domains// /}"; else _gui_env_unset CIPI_GUI_SSO_DOMAINS; fi
+    if [[ -n "${ARG_scopes:-}" ]]; then _gui_env_set CIPI_GUI_SSO_SCOPES "$ARG_scopes"; else _gui_env_unset CIPI_GUI_SSO_SCOPES; fi
+    [[ "${ARG_only:-}" == "true" ]] && _gui_env_set CIPI_GUI_SSO_ONLY true
+    _gui_sso_apply
+    unset secret
+    if [[ "$relink" == true ]]; then
+        _gui_sso_reset_links
+        info "New provider or client id: the identities linked so far were forgotten — everyone links again at the next sign-in"
+    fi
+
+    log_action "GUI SSO SET: issuer=${issuer}"
+    cipi_notify \
+        "Cipi GUI single sign-on configured on $(hostname)" \
+        "The panel signs in over OpenID Connect.\n\nServer: $(hostname)\nIssuer: ${issuer}\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        gui_sso
+    success "Single sign-on: $(_gui_env_get CIPI_GUI_SSO_LABEL | grep . || _gui_sso_default_label "$issuer") (${issuer})"
+    echo ""
+    gui_sso_status
+    local gv; gv=$(_gui_pkg_version "${CIPI_GUI_ROOT}/vendor/cipi/gui")
+    if [[ -n "$gv" && "$(printf '%s\n4.0.2\n' "$gv" | sort -V | head -1)" != "4.0.2" ]]; then
+        warn "The panel runs cipi/gui ${gv}: single sign-on needs 4.0.2 or later — run: cipi gui update"
+    fi
+}
+
+gui_sso_status() {
+    _gui_sso_require_app
+    local issuer cid label domains only scopes secret
+    issuer=$(_gui_env_get CIPI_GUI_SSO_ISSUER); cid=$(_gui_env_get CIPI_GUI_SSO_CLIENT_ID)
+    secret=$(_gui_env_get CIPI_GUI_SSO_CLIENT_SECRET); label=$(_gui_env_get CIPI_GUI_SSO_LABEL)
+    domains=$(_gui_env_get CIPI_GUI_SSO_DOMAINS); only=$(_gui_env_get CIPI_GUI_SSO_ONLY); scopes=$(_gui_env_get CIPI_GUI_SSO_SCOPES)
+    echo -e "${BOLD}Cipi GUI single sign-on${NC}"
+    if [[ -z "$issuer" ]]; then
+        echo -e "  Status:        ${DIM}off${NC} — password sign-in only"
+        echo -e "  ${DIM}Turn on: cipi gui sso set --issuer=<url> --client-id=<id> --client-secret=<secret>${NC}"
+        echo ""
+        return 0
+    fi
+    echo -e "  Status:        ${GREEN}on${NC} (OpenID Connect)"
+    echo -e "  Button:        ${CYAN}Sign in with ${label:-$(_gui_sso_default_label "$issuer")}${NC}"
+    echo -e "  Issuer:        ${CYAN}${issuer}${NC}"
+    echo -e "  Client ID:     ${CYAN}${cid:-?}${NC}"
+    echo -e "  Client secret: ${CYAN}$([[ -n "$secret" ]] && printf '%s' "${secret:0:4}…" || echo "missing")${NC}"
+    echo -e "  Scopes:        ${CYAN}${scopes:-openid email profile}${NC}"
+    echo -e "  Redirect URI:  ${CYAN}$(_gui_sso_redirect_uri)${NC}  ${DIM}(register this at the identity provider)${NC}"
+    if [[ -n "$domains" ]]; then
+        echo -e "  New accounts:  ${CYAN}${domains}${NC}  ${DIM}(first sign-in from these domains creates a user with no access — grant it in Team)${NC}"
+    else
+        echo -e "  New accounts:  ${DIM}none — only people who already have an account (invite link, cipi gui reset-user)${NC}"
+    fi
+    if [[ "$only" == "true" ]]; then
+        echo -e "  Password:      ${RED}off for everyone${NC}  ${DIM}(break-glass: cipi gui sso only off)${NC}"
+    else
+        echo -e "  Password:      ${GREEN}still accepted${NC}  ${DIM}(SSO only: cipi gui sso only on)${NC}"
+    fi
+    echo ""
+}
+
+# cipi gui sso only on|off — password sign-in off for everyone, or back.
+gui_sso_only() {
+    _gui_sso_require_app
+    case "${1:-}" in
+        on)
+            [[ -n "$(_gui_env_get CIPI_GUI_SSO_ISSUER)" ]] || { error "Single sign-on is not configured: cipi gui sso set … first"; exit 1; }
+            _gui_env_set CIPI_GUI_SSO_ONLY true
+            _gui_sso_apply
+            log_action "GUI SSO ONLY: on"
+            success "Password sign-in is off for everyone — the SSO button only"
+            echo -e "  ${DIM}Locked out? From the server: cipi gui sso only off${NC}" ;;
+        off)
+            _gui_env_unset CIPI_GUI_SSO_ONLY
+            _gui_sso_apply
+            log_action "GUI SSO ONLY: off"
+            success "Password sign-in accepted again (single sign-on stays on)" ;;
+        *) error "Usage: cipi gui sso only on|off"; exit 1 ;;
+    esac
+}
+
+gui_sso_disable() {
+    _gui_sso_require_app
+    [[ -n "$(_gui_env_get CIPI_GUI_SSO_ISSUER)" ]] || { info "Single sign-on is already off"; return 0; }
+    local k
+    for k in $GUI_SSO_KEYS; do _gui_env_unset "$k"; done
+    _gui_sso_apply
+    log_action "GUI SSO DISABLED"
+    cipi_notify \
+        "Cipi GUI single sign-on disabled on $(hostname)" \
+        "The panel is back to password sign-in.\n\nServer: $(hostname)\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')" \
+        gui_sso
+    success "Single sign-on off — password sign-in for everyone; accounts and their SSO links are kept"
+}
+
+gui_sso_command() {
+    local sub="${1:-status}"
+    shift || true
+    case "$sub" in
+        set|configure) gui_sso_set "$@" ;;
+        status|show)   gui_sso_status ;;
+        only)          gui_sso_only "$@" ;;
+        disable|off)   gui_sso_disable ;;
+        *)
+            error "Usage: cipi gui sso set --issuer=<url> --client-id=<id> --client-secret=<secret> [--label=] [--domains=] [--only]"
+            echo "       cipi gui sso status | only on|off | disable"
+            exit 1 ;;
+    esac
+}
+
 gui_command() {
     local sub="${1:-}"
     shift || true
 
     case "$sub" in
         "")
-            error "Usage: cipi gui <domain>"
+            error "Usage: cipi gui <domain> [--no-ssl] [--skip-dns-check]"
             echo "       cipi gui ssl | move <domain> [--no-ssl] | update | upgrade | status | fix-permissions | repair"
             echo "       cipi gui refresh-theme"
             echo "       cipi gui remove [--force] | uninstall [--force]"
             echo "       cipi gui reset-user [--email=] [--password=] [--name=]"
+            echo "       cipi gui sso set|status|only on|off|disable"
             exit 1
             ;;
-        ssl) gui_ssl ;;
+        ssl) gui_ssl "$@" ;;
         move) gui_move "$@" ;;
         update) gui_update ;;
         upgrade) gui_upgrade ;;
@@ -988,8 +1295,9 @@ gui_command() {
         refresh-theme) gui_refresh_theme ;;
         remove|uninstall) gui_remove "$@" ;;
         reset-user|reset-password) gui_reset_user "$@" ;;
+        sso) gui_sso_command "$@" ;;
         *)
-            validate_domain "$sub" && gui_setup "$sub" || exit 1
+            validate_domain "$sub" && gui_setup "$sub" "$@" || exit 1
             ;;
     esac
 }

@@ -4,6 +4,66 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.2] — 2026-10-28
+
+From the field again: a new server, and the end of the install lost the one line that mattered. The credentials were followed by a page of optional commands, the "save these" warning scrolled past, and a fresh server whose root password nobody wrote down is a server to reinstall. Three things change: the installer, the two panel commands, and a way to get the passwords back — with two fixes that were waiting in the same tree, the GUI that never updated and a `cipi yml plan` that never settled.
+
+### Changed — the installer: keys, a plan, the credentials, then the rest
+
+- **More than one SSH key.** After the first key the installer asks `Add another SSH public key? [y/N]` until Enter; each key is checked and shown with its type, fingerprint and comment, a duplicate is refused. `SSH_PUBKEY` (non-interactive) may hold several keys, one per line. Without a terminal and without `SSH_PUBKEY` it stops with the command to use, instead of looping on an empty read.
+- **A plan before anything is installed**: the server (IP, hostname, OS), the SSH access it will set up (the keys, root without SSH login, passwords off), the stack, which passwords will be generated, and `Proceed with the installation? [Y/n]`. `n` leaves the machine untouched.
+- **The credentials in one layout** at the end: a title, then `User:` and `Password:` under it, the same rows for every block — Root, MariaDB, Valkey, and PostgreSQL, Meilisearch, the backup key when they exist — so one block is one password-manager entry. The warning comes first, and the installer **waits until `y` to "Have you saved these credentials?"** before it prints anything else.
+- **The optional layers are questions**, after that confirmation: `Install the panel API now?`, then `Install the web GUI on this server now?`. Each asks its domain and runs the normal command (stdin on the terminal: the script's own stdin is the pipe from wget), and offers another go when it fails. What was a page of five numbered steps is four lines of commands for later.
+
+### Changed — `cipi api <domain>` and `cipi gui <domain>` finish the job
+
+- **DNS check first.** Both resolve the domain before touching anything: it must point at this server — its public address or one of the machine's own; the Cloudflare proxy ranges count, HTTP-01 is answered through the proxy. A name that does not resolve, or points elsewhere, stops the command with the record to create and nothing installed: `DNS: api.example.com points to 1.2.3.4, this server is 5.6.7.8`. `--skip-dns-check` for a NAT or a proxy Cipi cannot see through. `cipi api ssl`, `cipi gui ssl`, `cipi api move` and `cipi gui move` run the same check (`move --no-ssl` does not: a move staged on purpose).
+- **The certificate is part of the setup.** `cipi api <domain>` and `cipi gui <domain>` end with the Let's Encrypt certificate, and their summary shows `https://`. When certbot fails anyway (port 80 closed, a rate limit) the summary says so, names `cipi api ssl` / `cipi gui ssl`, and the command exits 1. `--no-ssl` skips it on purpose.
+- **A token offered at the end of `cipi api`.** On a terminal, after the summary: `Create an API token now? [Y/n]` runs the token wizard, so a first install ends with what the GUI panel, cipi-cli and CI need. A script (no terminal) and `--no-token` get the command instead.
+- `cipi gui` ends with the next step: Connections → Add this server with its API URL and a token when the API is on the same server, `cipi api <domain>` on each server to manage otherwise.
+- Help, shell completion (`--no-ssl --no-token --skip-dns-check` after the domain, `--skip-dns-check` after `ssl`), README and docs follow.
+
+### Added — `cipi credentials`: the install summary again, and exported
+
+- `cipi credentials` prints the same card as the installer from the encrypted `/etc/cipi`: root, MariaDB root, PostgreSQL, Valkey, the Meilisearch master key and the backup encryption key, each when it exists. Logged in as `cipi`: `sudo cipi credentials`.
+- `cipi credentials export [--output=FILE]` writes them as plain CSV, `title,url,username,password,notes`: the layout 1Password, Bitwarden, Apple Passwords, Chrome, KeePassXC, Proton Pass and the rest import (one entry per row, a confirmation of the column mapping at most). Stdout by default, so nothing is left on the server: from your own machine, `ssh cipi@<ip> sudo cipi credentials export > cipi.csv`. `--output` writes mode 600 and refuses to overwrite an existing file.
+- Every show or export is logged (`cipi.log`) and raises the notification trigger `credentials_show` (Security), on by default like `su` and `sudo`.
+- `cipi help credentials`, shell completion; `cipi help reset` points to it.
+
+### Added — `cipi gui sso`: single sign-on for the panel (issue #515)
+
+- `cipi gui sso set --issuer=<url> --client-id=<id> --client-secret=<secret> [--label=<text>] [--domains=<a.com,b.com>] [--only] [--scopes=<list>]` turns on OpenID Connect sign-in in the panel: Microsoft Entra ID (`https://login.microsoftonline.com/<tenant>/v2.0`), Google Workspace, Okta, Keycloak, Authentik — anything with a discovery document. It writes the settings to the panel's `.env` (Cipi's file to write), clears the config cache and prints the **Redirect URI** to register at the identity provider (`https://<panel>/auth/sso/callback`). The secret is asked on the terminal when the flag is omitted.
+- Who gets in: people who already have an account (seeded, invited) are matched by email and linked to their identity on first sign-in; with `--domains`, a first sign-in from one of those email domains creates an account with role `user` and no access, to be granted in Team. Anyone else is refused. The identity provider is the authority for MFA: the panel's TOTP step is skipped after an SSO sign-in.
+- `set` with a new issuer or client id forgets the identities linked so far (an identity's `sub` is per provider, and Entra ID's is per app registration): everyone links again at the next sign-in. Entra ID wants the tenant-specific issuer, `https://login.microsoftonline.com/<tenant-id>/v2.0`, not `common`.
+- `cipi gui sso only on` switches password sign-in off for everyone; `cipi gui sso only off` and `cipi gui sso disable` are the break-glass, from the server, so a misconfigured provider never locks the panel. `cipi gui sso status` shows it all with the secret masked. Logged, notification trigger `gui_sso` (Security).
+- Needs cipi/gui 4.0.2 (`cipi gui update`); the command warns when the panel is older.
+
+### Fixed — the GUI never updated: every panel stayed on the version of its last `composer.json`
+
+`cipi gui update`, and the nightly `cipi self-update` that calls the same step, download the current cipi/gui into `/opt/cipi/cipi-gui` and run `composer require cipi/gui:@dev` on a path repository copied into `vendor/` (no symlink, because of PHP-FPM's `open_basedir`). Composer identifies a path repository by the sha1 of its `composer.json`, not by its files: with an unchanged `composer.json` (cipi/gui's last changed at 3.0.0) it reports nothing to change and leaves `vendor/cipi/gui` as it was. The synced package moved on every night, the panel did not.
+
+- The update step now runs `composer reinstall cipi/gui` after the require (`composer update cipi/gui` when reinstall is not available), then compares the version in `vendor/cipi/gui` with the synced package and fails loudly when they differ: `vendor/cipi/gui is 3.3.0, the synced package is 4.0.0 — the panel did not update (run: cipi gui update)`. The success line names the version installed. Migrations, config publish and the theme refresh run as before.
+- Nothing to do on installed servers: the next `cipi self-update` (03:50 nightly) runs the fixed step and brings every panel to the current cipi/gui.
+
+### Fixed — `cipi yml plan` never reached "in sync" (the panel kept saying "N changes to apply")
+
+Some comparisons of the plan could not converge after an apply, so the cipi.yml tab counted them as pending forever.
+
+- `update backup profile <name>` was emitted for every declared profile that existed, with no comparison at all. The plan now builds the profile the file asks for (the same code apply saves, `_yml_backup_profile_desired`) and lists it only when the stored one differs.
+- `update queue worker <queue>` was emitted for every declared queue whose Supervisor program existed. The plan now reads processes, tries and timeout back from the program (as `cipi yml generate` already did) and lists only a worker that differs.
+- `healthcheck …`: a `grace` set earlier (`cipi health set --grace`, an older file) was never cleared when the file omits it; apply now unsets it.
+- `php.ini <key> = 1 (was On)`: the plan compared the raw value with the one `cipi ini` stores (On/Off for flags). It now compares the normalised value, and a value `cipi ini` would refuse blocks the plan with its name instead of ending the apply halfway (`_ini_set` exits; it runs in a subshell now, so a refused key fails its own action only). `opcache.jit: off` as a YAML boolean arrived as `Off` and was refused: the spelling is normalised.
+- `enable search`: an app Meilisearch knew but `apps.json` had lost (restored or rewritten) was "applied" every time without `search: true` coming back; it does now.
+- `scheduled commands — N managed cron entries` came back once more after an apply that also changed the PHP version: the lines are now built at apply time with the version in force. `cipi schedule on|off` (and the `schedule:` action) dropped the `# cipi-yml` lines from the crontab; they are kept. A managed cron running `artisan schedule:run` no longer counts as the Laravel scheduler, which made `schedule: false` and `crons` undo each other on every apply.
+
+No migration: nothing to do on installed servers beyond the nightly `cipi self-update`.
+
+### Ecosystem
+
+- cipi/gui 4.0.2: **single sign-on over OpenID Connect** (the `cipi gui sso` settings above: a "Sign in with …" button, PKCE, identity from the provider's userinfo endpoint, accounts matched by email, optional auto-created accounts per domain, SSO-only mode, a read-only card in Settings → Panel). From the same field report as this release: the header's server switcher and the per-server sidebar entries follow the Connections page without a reload (a server added, renamed, removed, enabled or disabled, a test that changed its state), the header follows Settings → Profile, a job closed with "Run in background" keeps being polled and reloads what it changed when it finishes, a failed job reloads the Apps, Databases and Server pages, App → Deploy re-reads its ledger after a deploy started elsewhere on the page, and App → Logs refreshes after a job of the app. `cipi gui update` (or the nightly self-update) brings it in.
+
+---
+
 ## [5.8.1] — 2026-10-27
 
 ### Fixed — `cipi deploy` exited 1 after a successful deploy (the panel and the API showed it as *Failed*)

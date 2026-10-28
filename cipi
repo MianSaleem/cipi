@@ -67,7 +67,7 @@ _help_topics_list() {
     cat <<'EOF'
 app  use  node  domains  www  redirect  proxy  deploy  worker  schedule  health  monitor  db  search  service  ssl
 php  package  auth  basicauth  ssh  firewall  ban  crowdsec  zt  scan  compliance  backup  sync
-git  ini  yml  nginx  api  gui  smtp  notifications  reset  server  completion
+git  ini  yml  nginx  api  gui  smtp  notifications  reset  credentials  server  completion
 EOF
 }
 
@@ -115,6 +115,7 @@ show_help() {
     _help_cmd "cipi compliance ..."        "ISO 27001 / SOC 2 evidence  ${DIM}check|report${NC}"
     _help_cmd "cipi auth / basicauth ..."  "Composer auth.json & HTTP basic auth"
     _help_cmd "cipi reset ..."             "Reset root / DB / Valkey passwords"
+    _help_cmd "cipi credentials ..."       "The server passwords again, or as CSV for a password manager  ${DIM}[export]${NC}"
     echo ""
     echo -e "  ${BOLD}Panel${NC}"
     _help_cmd "cipi api ..."               "REST API for the control panel"
@@ -514,8 +515,8 @@ show_help_topic() {
         api)
             _help_topic_header "API"
             echo ""
-            _help_cmd "cipi api <domain>"              "Configure API at its own (sub)domain"
-            _help_cmd "cipi api ssl"                   "SSL for API domain"
+            _help_cmd "cipi api <domain>"              "DNS check, install, certificate, token — one command  ${DIM}[--no-ssl --no-token --skip-dns-check]${NC}"
+            _help_cmd "cipi api ssl"                   "(Re)issue the certificate  ${DIM}[--skip-dns-check]${NC}"
             _help_cmd "cipi api move <domain>"         "Move API to another domain (SSL included)"
             _help_cmd "cipi api remove"                "Remove API, MCP, tokens and certificate"
             _help_cmd "cipi api update"                "Update Laravel + cipi-api"
@@ -525,16 +526,16 @@ show_help_topic() {
             _help_cmd "cipi api ip-whitelist"          "API client IP allowlist  ${DIM}show|add|remove|set|allow-all${NC}"
             _help_cmd "cipi api fix-permissions"       "Fix panel API ownership (SQLite/logs)"
             _help_note "ip-whitelist default * (all IPs); add GUI server + operator IPs before locking down"
-            _help_note "The API needs a domain of its own (e.g. api.example.com), not an app's"
-            _help_note "move flags: --no-ssl   remove flags: --force (alias: uninstall)"
+            _help_note "The API needs a domain of its own (e.g. api.example.com), not an app's, pointed at this server first"
+            _help_note "move flags: --no-ssl --skip-dns-check   remove flags: --force (alias: uninstall)"
             echo ""
             ;;
 
         gui|panel)
             _help_topic_header "GUI"
             echo ""
-            _help_cmd "cipi gui <domain>"              "Configure panel at its own (sub)domain"
-            _help_cmd "cipi gui ssl"                   "SSL for GUI domain"
+            _help_cmd "cipi gui <domain>"              "DNS check, admin account, install, certificate — one command  ${DIM}[--no-ssl --skip-dns-check]${NC}"
+            _help_cmd "cipi gui ssl"                   "(Re)issue the certificate  ${DIM}[--skip-dns-check]${NC}"
             _help_cmd "cipi gui move <domain>"         "Move GUI to another domain (SSL included)"
             _help_cmd "cipi gui update"                "Update cipi/gui, migrate, refresh theme"
             _help_cmd "cipi gui refresh-theme"         "Reload GUI CSS/views from package"
@@ -543,10 +544,13 @@ show_help_topic() {
             _help_cmd "cipi gui fix-permissions"       "Repair GUI (open_basedir, vendor, perms)"
             _help_cmd "cipi gui repair"                "Alias for fix-permissions"
             _help_cmd "cipi gui reset-user"            "Reset admin email/password (clears 2FA)"
+            _help_cmd "cipi gui sso set"               "Single sign-on (OpenID Connect)  ${DIM}--issuer= --client-id= --client-secret= [--label= --domains= --only]${NC}"
+            _help_cmd "cipi gui sso status|only on|off|disable" "Show it, password sign-in off/on, turn SSO off"
             _help_cmd "cipi gui remove"                "Remove GUI panel (alias: uninstall)"
             _help_note "reset-user flags: --email= --password= --name="
-            _help_note "move flags: --no-ssl   remove flags: --force"
-            _help_note "The GUI needs a domain of its own (e.g. panel.example.com), not an app's"
+            _help_note "sso: Entra ID issuer https://login.microsoftonline.com/<tenant>/v2.0; register the Redirect URI it prints; needs cipi/gui 4.0.2+"
+            _help_note "move flags: --no-ssl --skip-dns-check   remove flags: --force"
+            _help_note "The GUI needs a domain of its own (e.g. panel.example.com), not an app's, pointed at this server first"
             _help_note "Requires cipi api on managed servers + API tokens"
             echo ""
             ;;
@@ -892,6 +896,18 @@ show_help_topic() {
             _help_cmd "cipi reset root-password"       "Reset root SSH password"
             _help_cmd "cipi reset db-password"         "Reset DB root password  ${DIM}[--engine=]${NC}"
             _help_cmd "cipi reset valkey-password"     "Reset Valkey password"
+            _help_note "The current ones, again: cipi credentials"
+            echo ""
+            ;;
+
+        credentials|creds)
+            _help_topic_header "Credentials"
+            echo ""
+            _help_cmd "cipi credentials"               "The install summary again: root, MariaDB, PostgreSQL, Valkey, Meilisearch, backup key"
+            _help_cmd "cipi credentials export"        "CSV for a password manager  ${DIM}[--output=FILE]${NC}"
+            _help_note "title,url,username,password,notes — 1Password, Bitwarden, Apple Passwords, Chrome, KeePassXC, Proton Pass import it"
+            _help_note "Nothing left on the server: ssh cipi@<ip> sudo cipi credentials export > cipi.csv"
+            _help_note "Every show or export is logged and notified (trigger credentials_show)"
             echo ""
             ;;
 
@@ -1072,6 +1088,7 @@ main() {
         smtp)       _maybe_cmd_help smtp "$@";       require_root; source "${CIPI_LIB}/smtp.sh";      smtp_command "$@" ;;
         notifications) _maybe_cmd_help notifications "$@"; require_root; source "${CIPI_LIB}/notifications.sh"; notifications_command "$@" ;;
         reset)      _maybe_cmd_help reset "$@";      require_root; source "${CIPI_LIB}/reset.sh";     reset_command "$@" ;;
+        credentials|creds) _maybe_cmd_help credentials "$@"; require_root; source "${CIPI_LIB}/credentials.sh"; credentials_command "$@" ;;
         *) error "Unknown command: $cmd"; echo "Run 'cipi help'"; exit 1 ;;
     esac
 }

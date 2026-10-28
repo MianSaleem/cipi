@@ -158,7 +158,8 @@ _ini_validate_value() {
             fi
             ;;
         jit)
-            [[ "$val" =~ ^(off|on|disable|tracing|function|[0-9]{4})$ ]] \
+            # Off/On as a YAML boolean arrives capitalised: the spelling is normalised below.
+            [[ "$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" =~ ^(off|on|disable|tracing|function|[0-9]{4})$ ]] \
                 || { error "Invalid opcache.jit value: '${val}' (off, tracing, function or a 4-digit spec)"; return 1; }
             ;;
         *)
@@ -172,6 +173,9 @@ _ini_validate_value() {
 # Normalise a flag to PHP's On/Off spelling.
 _ini_normalize_value() {
     local key="$1" val="$2"
+    case "$(_ini_key_type "$key")" in
+        jit) printf '%s\n' "$val" | tr '[:upper:]' '[:lower:]'; return 0 ;;
+    esac
     if [[ "$(_ini_key_type "$key")" == "flag" ]]; then
         case "$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" in
             on|1|true|yes)  echo "On" ;;
