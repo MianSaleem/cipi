@@ -683,6 +683,14 @@ if [[ -n "$DB_FILE" && -f "$DB_FILE" ]] && command -v sqlite3 >/dev/null 2>&1; t
         "DELETE FROM cipi_jobs WHERE status IN ('completed','failed') AND created_at < datetime('now','-14 days'); SELECT changes();" 2>/dev/null)
     echo "  cipi_jobs pruned: ${deleted:-0}"
 
+    # Jobs whose output holds a password — app create (SSH + database), db
+    # create, db password — are kept one day, not fourteen (5.8.3). The panel,
+    # cipi-cli and the SDK read the result as the job completes; nothing reads
+    # it later. Same guard: finished jobs only, never running/pending.
+    sdeleted=$(/usr/bin/sqlite3 "$DB_FILE" \
+        "DELETE FROM cipi_jobs WHERE status IN ('completed','failed') AND type IN ('app-create','db-create','db-password') AND created_at < datetime('now','-1 day'); SELECT changes();" 2>/dev/null)
+    echo "  cipi_jobs with credentials pruned: ${sdeleted:-0}"
+
     # Prune the server-metrics table. cipi:record-server-metrics inserts one
     # row every minute; nothing in the package prunes it, so over weeks it
     # grows to hundreds of thousands of rows and every dashboard/server query

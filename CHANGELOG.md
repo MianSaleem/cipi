@@ -4,6 +4,19 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.3] — 2026-10-28
+
+A security report on the panel API, verified and closed. `GET /api/jobs/{id}` was the one route without an ability: any token of the API, however narrow it had been scoped with `cipi api token create --abilities=…`, could read the result and the CLI output of any job by its id. The output of an app create holds the SSH and database passwords, that of a database create or password change the database password. The id is a UUID that only the caller of the job receives, so it had to leak first (a CI log, a shared screen); still, a scoped token must not read what it could not do.
+
+### Security
+
+- **cipi/api 1.36.1 — a job is shown only to a token holding the ability the job was created under**: `apps-create` for `app-create`, `dbs-manage` for `db-password`, `deploy-manage` for a deploy, `apps-artisan` for `app-artisan`, one ability per job type, the same one the route that queued it enforces. Any other token gets the `404 Job not found` of an unknown id, so an id alone tells nothing. Every token that could start a job can still poll it: the GUI's token has every ability, a CI token reads the deploy it started. MCP is unchanged (`mcp-access` is the one ability of every MCP tool). Installed servers get it with the nightly `cipi self-update`, which updates cipi/api from Packagist in the same run, or now with `cipi api update`.
+- **Jobs that hold a password are kept one day, not fourteen.** The daily maintenance of the panel API (`cipi-api-maintain`, 04:15) already pruned finished jobs after 14 days; `app-create`, `db-create` and `db-password` jobs are now pruned after 24 hours. The panel, cipi-cli and the SDK read the result as the job completes; nothing reads it later. Migration 5.8.3 rewrites the maintenance script on servers with the API installed and runs it once.
+
+### Ecosystem
+
+- cipi/sdk, cipi-cli and cipi/agent need no code change: `wait()`, `jobs show|wait` and `panel_job` run with the token that queued the job. Their docs now say which ability a job read needs. The GUI's token holds every ability and is not affected.
+
 ## [5.8.2] — 2026-10-28
 
 From the field again: a new server, and the end of the install lost the one line that mattered. The credentials were followed by a page of optional commands, the "save these" warning scrolled past, and a fresh server whose root password nobody wrote down is a server to reinstall. Three things change: the installer, the two panel commands, and a way to get the passwords back — with two fixes that were waiting in the same tree, the GUI that never updated and a `cipi yml plan` that never settled.
