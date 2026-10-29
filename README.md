@@ -169,7 +169,7 @@ Patch-level only (`apt --only-upgrade` of what is already installed). Cipi confi
 
 ### ⚡ Zero-Downtime Deploys
 
-Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`). `cipi deploy <app> --releases` lists the releases with their commit and how long each deploy took.
+Deployer clones your repo, runs `composer install`, links storage, runs migrations, and swaps the symlink atomically. Optional **Node build** on deploy (`cipi app edit --node-build=…`). Roll back to any of the last 5 releases instantly. Opt-in **pre-deploy DB snapshot** (`cipi deploy --snapshot`). `cipi deploy <app> --releases` lists the releases with their commit and how long each deploy took. `cipi deploy <app> --status` says whether a deploy is running right now — whoever started it, a Git push included — and how the last one ended (`--json` for scripts and the panel).
 
 Every deploy is recorded in a root-owned, hash-chained **audit ledger** (`/var/log/cipi/deploys.jsonl`, also sent to syslog), whatever started it: `cipi deploy`, the Git webhook, cipi/agent, the panel, or `dep deploy` run by hand. Each record has the release, the commit, and who started the deploy, read by root from the process chain: origin, login user and SSH address. `cipi deploy <app> --audit` shows it.
 

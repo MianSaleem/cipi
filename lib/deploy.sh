@@ -79,7 +79,7 @@ deploy_log_close() {
 
 deploy_command() {
     local app="${1:-}"; shift||true
-    [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--log|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]"; exit 1; }
+    [[ -z "$app" ]] && { error "Usage: cipi deploy <app> [--rollback|--releases|--log|--status|--key|--webhook|--snapshot|--snapshot-required|--rollback-on-unhealthy]"; exit 1; }
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
 
@@ -91,6 +91,7 @@ deploy_command() {
     elif [[ "${ARG_unlock:-}" == "true" ]];          then _deploy_unlock "$app"
     elif [[ -n "${ARG_trust_host:-}" ]];             then _deploy_trust_host "$app" "${ARG_trust_host}"
     elif [[ "${ARG_audit:-}" == "true" ]];           then _deploy_audit_show "$app"
+    elif [[ "${ARG_status:-}" == "true" ]];          then _deploy_status "$app"
     else _deploy_run "$app"
     fi
 }
@@ -209,7 +210,13 @@ _deploy_run() {
     local rel_before; rel_before=$(deploy_current_release "$app")
     local t0=$SECONDS
 
-    deploy_log_open "$app" "cli" "$branch_disp" "$rel_before"
+    # The start banner names who started this run — what `--status` and the
+    # panel show while it runs: "panel" when the API started it (www-data,
+    # through sudo), "cli" from a terminal. The audit ledger establishes the
+    # origin on its own, from the process chain, and is not told anything here.
+    local trigger="cli"
+    [[ "${SUDO_USER:-}" == "www-data" ]] && trigger="panel"
+    deploy_log_open "$app" "$trigger" "$branch_disp" "$rel_before"
 
     info "Deploying '${app}'..."
     echo ""
@@ -566,6 +573,211 @@ _deploy_log_show() {
     echo -e "\n${BOLD}Deploy log — ${app}${NC} ${DIM}(last ${lines} lines of ${lf})${NC}\n"
     tail -n "$lines" "$lf"
     echo ""
+}
+
+# ── Is a deploy running? ─────────────────────────────────────
+#
+# cipi deploy <app> --status [--json] [--tail=N]
+#
+# Both deploy paths write the same two banners to the app's deploy log: one
+# when they start and one when they finish, whoever started them — `cipi
+# deploy`, the panel, a Git push through the webhook, cipi/agent, a rollback.
+# A start with no end after it is a deploy in flight, as long as something is
+# still working on it: Deployer itself, the webhook wrapper (cipi-app-deploy)
+# or the `cipi deploy` that started it, which run the post-deploy steps and
+# the healthcheck once Deployer has finished. With nothing alive any more it
+# was interrupted (a reboot, a kill) and the lock it left behind is what
+# --unlock removes. A ~/.deploy-trigger the per-minute cron has not picked up
+# yet is a push about to deploy: queued.
+#
+# This is what the panel polls to show a deploy it did not start. The output
+# never changes anything, so it is safe at any moment, as often as needed.
+
+# Seconds since the epoch for a "YYYY-mm-dd HH:MM:SS" banner timestamp (local
+# time, as the log writes it). GNU date on the servers; BSD date in the tests.
+_deploy_epoch() {
+    local ts="$1" e=""
+    e=$(date -d "$ts" +%s 2>/dev/null) || e=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts" +%s 2>/dev/null) || e=""
+    [[ "$e" =~ ^[0-9]+$ ]] || e=""
+    echo "$e"
+}
+
+# ISO 8601 with the server's UTC offset, from seconds since the epoch — a
+# banner's local time means nothing to a panel in another timezone.
+_deploy_iso() {
+    local e="$1" s=""
+    [[ "$e" =~ ^[0-9]+$ ]] || { echo ""; return 0; }
+    s=$(date -d "@${e}" '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null) || s=$(date -r "$e" '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null) || s=""
+    echo "$s"
+}
+
+# "<pid>\t<kind>" per live process that belongs to a deploy of this app:
+#   dep      Deployer (both paths run it as the app user), deploying or rolling back
+#   wrapper  cipi-app-deploy, the webhook path, before and after Deployer
+#   cli      a `cipi deploy <app>` that deploys or rolls back — not this
+#            --status, nor --log, --audit and the other forms that only read
+_deploy_live_pids() {
+    local app="$1" pid args rest
+    ps axww -o pid=,args= 2>/dev/null | while read -r pid args; do
+        [[ "$pid" == "$$" || "$pid" == "$PPID" ]] && continue
+        case "$args" in
+            *"dep deploy -f /home/${app}/.deployer/deploy.php"*|*"dep rollback -f /home/${app}/.deployer/deploy.php"*)
+                printf '%s\tdep\n' "$pid" ;;
+            *"cipi-app-deploy ${app} "*)
+                printf '%s\twrapper\n' "$pid" ;;
+            *"/cipi deploy ${app}"|*"/cipi deploy ${app} "*)
+                rest=" ${args#*/cipi deploy ${app}} "
+                case "$rest" in
+                    *" --status"*|*" --log"*|*" --releases"*|*" --key"*|*" --webhook"*|*" --unlock"*|*" --trust-host"*|*" --audit"*) ;;
+                    *) printf '%s\tcli\n' "$pid" ;;
+                esac ;;
+        esac
+    done
+}
+
+_deploy_status() {
+    local app="$1" tail_n="${ARG_tail:-0}"
+    [[ "$tail_n" =~ ^[0-9]{1,3}$ ]] || { error "--tail must be a number of lines (1-500)"; exit 1; }
+    [[ "$tail_n" -le 500 ]] || tail_n=500
+    local home lf; home=$(deploy_app_home "$app"); lf=$(deploy_log_file "$app")
+
+    local re_start='^\[([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\] ===== deploy start +app=[^ ]+ trigger=([^ ]+) branch=([^ ]+) from-release=([^ ]+) =====$'
+    local re_end='^\[([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\] ===== deploy (ROLLBACK )?(OK|FAILED) +app=[^ ]+ release=([^ ]+) duration=([0-9]+)s exit=(-?[0-9]+) =====$'
+
+    # One pass over the banners: the last start, the last end, and the start
+    # that belongs to that end. A start after the last end is an open run.
+    local n line start_no=0 start_line="" end_no=0 end_line="" end_start_line=""
+    if [[ -f "$lf" ]]; then
+        while IFS= read -r line; do
+            n="${line%%:*}"; line="${line#*:}"
+            if [[ "$line" =~ $re_start ]]; then
+                start_no=$n; start_line=$line
+            elif [[ "$line" =~ $re_end ]]; then
+                end_no=$n; end_line=$line; end_start_line=$start_line
+            fi
+        done < <(grep -n '\] ===== deploy ' "$lf" 2>/dev/null || true)
+    fi
+
+    local queued=false locked=false
+    [[ -f "${home}/.deploy-trigger" ]] && queued=true
+    [[ -f "${home}/.dep/deploy.lock" ]] && locked=true
+    local pids; pids=$(_deploy_live_pids "$app")
+    local pid_list=""; [[ -n "$pids" ]] && pid_list=$(cut -f1 <<< "$pids" | tr '\n' ' ')
+
+    local state="idle" phase="" has_cur=false
+    local cur_trigger="" cur_branch="" cur_from="" cur_started="" cur_epoch="" cur_elapsed=""
+    if [[ $start_no -gt $end_no && "$start_line" =~ $re_start ]]; then
+        has_cur=true
+        cur_started="${BASH_REMATCH[1]}"; cur_trigger="${BASH_REMATCH[2]}"
+        cur_branch="${BASH_REMATCH[3]}";  cur_from="${BASH_REMATCH[4]}"
+        cur_epoch=$(_deploy_epoch "$cur_started")
+        [[ -n "$cur_epoch" ]] && cur_elapsed=$(( $(date +%s) - cur_epoch ))
+        if [[ -n "$pids" ]]; then state="running"; else state="interrupted"; fi
+    elif [[ -n "$pids" ]]; then
+        # Alive without a banner: `dep deploy` run by hand as the app user,
+        # or a run that has not written its first line yet.
+        has_cur=true; state="running"
+    elif [[ "$queued" == true ]]; then
+        state="queued"
+    fi
+    if [[ "$state" == "running" ]]; then
+        phase="post-deploy"; grep -q $'\tdep$' <<< "$pids" && phase="deploy"
+    fi
+
+    local last_result="" last_kind="" last_release="" last_duration="" last_exit="" last_finished="" last_fin_epoch=""
+    local last_trigger="" last_branch="" last_from="" last_started="" last_start_epoch=""
+    if [[ -n "$end_line" && "$end_line" =~ $re_end ]]; then
+        last_finished="${BASH_REMATCH[1]}"
+        last_kind="deploy"; [[ -n "${BASH_REMATCH[2]}" ]] && last_kind="rollback"
+        last_result="ok"; [[ "${BASH_REMATCH[3]}" == "FAILED" ]] && last_result="failed"
+        last_release="${BASH_REMATCH[4]}"; last_duration="${BASH_REMATCH[5]}"; last_exit="${BASH_REMATCH[6]}"
+        last_fin_epoch=$(_deploy_epoch "$last_finished")
+        if [[ -n "$end_start_line" && "$end_start_line" =~ $re_start ]]; then
+            last_started="${BASH_REMATCH[1]}"; last_trigger="${BASH_REMATCH[2]}"
+            last_branch="${BASH_REMATCH[3]}";  last_from="${BASH_REMATCH[4]}"
+            last_start_epoch=$(_deploy_epoch "$last_started")
+        fi
+    fi
+
+    local tail_text=""
+    [[ "$tail_n" -gt 0 && -f "$lf" ]] && tail_text=$(tail -n "$tail_n" "$lf" 2>/dev/null || true)
+
+    if [[ "${ARG_json:-}" == "true" ]]; then
+        jq -n \
+            --arg app "$app" --arg state "$state" --arg phase "$phase" \
+            --argjson queued "$queued" --argjson locked "$locked" --argjson has_cur "$has_cur" \
+            --arg ct "$cur_trigger" --arg cb "$cur_branch" --arg cf "$cur_from" \
+            --arg cs "$(_deploy_iso "$cur_epoch")" --arg ce "$cur_elapsed" --arg pids "$pid_list" \
+            --arg lr "$last_result" --arg lk "$last_kind" --arg lrel "$last_release" \
+            --arg ld "$last_duration" --arg lx "$last_exit" --arg lf_at "$(_deploy_iso "$last_fin_epoch")" \
+            --arg lt "$last_trigger" --arg lb "$last_branch" --arg lfrom "$last_from" \
+            --arg ls_at "$(_deploy_iso "$last_start_epoch")" \
+            --arg log "$lf" --argjson tail_n "$tail_n" --arg tail "$tail_text" '
+            def nz: if . == "" then null else . end;
+            def num: if . == "" then null else tonumber end;
+            {app: $app, state: $state, running: ($state == "running"), phase: ($phase | nz),
+             queued: $queued, locked: $locked,
+             current: (if $has_cur then
+                 {trigger: ($ct | nz), branch: ($cb | nz), from_release: ($cf | nz),
+                  started_at: ($cs | nz), elapsed: ($ce | num),
+                  pids: ($pids | split(" ") | map(select(. != "")) | map(tonumber))}
+               else null end),
+             last: (if $lr == "" then null else
+                 {result: $lr, kind: $lk, release: ($lrel | nz), duration: ($ld | num), exit: ($lx | num),
+                  trigger: ($lt | nz), branch: ($lb | nz), from_release: ($lfrom | nz),
+                  started_at: ($ls_at | nz), finished_at: ($lf_at | nz)}
+               end),
+             log: $log}
+            + (if $tail_n > 0 then {tail: ($tail | split("\n") | if length > 0 and .[-1] == "" then .[:-1] else . end)} else {} end)'
+        return 0
+    fi
+
+    echo -e "\n${BOLD}Deploy status — ${app}${NC}\n"
+    case "$state" in
+        running)
+            if [[ "$phase" == "deploy" ]]; then
+                printf "  %-10s ${GREEN}running${NC} — Deployer is building the release\n" "State"
+            else
+                printf "  %-10s ${GREEN}running${NC} — post-deploy steps, cipi.yml, healthcheck\n" "State"
+            fi ;;
+        queued)      printf "  %-10s ${YELLOW}queued${NC} — a push is waiting for the per-minute cron\n" "State" ;;
+        interrupted) printf "  %-10s ${RED}interrupted${NC} — the last run never wrote its end banner and nothing is running it\n" "State" ;;
+        *)           printf "  %-10s idle\n" "State" ;;
+    esac
+    if [[ "$has_cur" == true ]]; then
+        if [[ -n "$cur_trigger" ]]; then
+            printf "  %-10s %s   branch %s   from release %s\n" "Trigger" "$cur_trigger" "$cur_branch" "$cur_from"
+            printf "  %-10s %s" "Started" "$cur_started"
+            [[ -n "$cur_elapsed" ]] && printf "  ${DIM}(%s ago)${NC}" "$(_deploy_fmt_secs "$cur_elapsed")"
+            echo ""
+        else
+            printf "  %-10s ${DIM}not started by cipi (dep run by hand?) — pid %s${NC}\n" "Trigger" "${pid_list% }"
+        fi
+    fi
+    [[ "$queued" == true && "$state" != "queued" ]] && printf "  %-10s a push is waiting — it deploys when this run ends\n" "Queued"
+    if [[ "$locked" == true ]]; then
+        if [[ "$state" == "interrupted" || "$state" == "idle" ]]; then
+            printf "  %-10s ${YELLOW}present${NC} — a stuck lock: cipi deploy %s --unlock\n" "Lock" "$app"
+        else
+            printf "  %-10s present (held by the run)\n" "Lock"
+        fi
+    fi
+    if [[ -n "$last_result" ]]; then
+        local verdict="${GREEN}OK${NC}"; [[ "$last_result" == "failed" ]] && verdict="${RED}FAILED${NC}"
+        [[ "$last_kind" == "rollback" ]] && verdict="rollback ${verdict}"
+        printf "  %-10s ${verdict} — release %s in %s, %s" "Last" "$last_release" "$(_deploy_fmt_secs "${last_duration:-0}")" "$last_finished"
+        [[ -n "$last_trigger" ]] && printf "  ${DIM}(%s, branch %s)${NC}" "$last_trigger" "$last_branch"
+        echo ""
+    else
+        printf "  %-10s ${DIM}no deploy recorded yet${NC}\n" "Last"
+    fi
+    printf "  %-10s %s\n" "Log" "$lf"
+    if [[ -n "$tail_text" ]]; then
+        echo -e "\n${DIM}── last ${tail_n} lines ──${NC}"
+        printf '%s\n' "$tail_text"
+    fi
+    echo ""
+    return 0
 }
 
 _deploy_unlock() {

@@ -4217,7 +4217,12 @@ _yml_example() {
     cat <<YMLEXAMPLE
 # cipi.yml — declarative configuration for one Cipi app.
 #
-# Commit this at the root of your repository. After a deploy, run
+# This file is a catalogue: every section the file can declare, with sample
+# values. Keep the sections you mean and delete the rest BEFORE you commit it
+# — applied as it is, it would add aliases, redirects, a proxy, databases and
+# backup profiles this app never asked for.
+#
+# Commit it at the root of your repository. After a deploy, run
 #   cipi yml plan ${app}     to see what would change
 #   cipi yml apply ${app}    to apply it
 # or turn on automatic apply with
@@ -4351,16 +4356,19 @@ deploy:
 #   - cron: "15 3 * * *"      # or five cron fields
 #     run: php scripts/cleanup.php
 
-# HTTP healthcheck. Probed every 5 minutes and right after every deploy.
-# The URL must be one of this app's own domains.
-health:
-  url: "https://${domain}/up"
-  expect: 200
-  # grace: 8                      # seconds before the first probe after a deploy
-  # postdeploy: false             # skip the check right after a deploy
-  # rollback_on_unhealthy: true   # undo a release that fails the check
-  #                               # (the code symlink only — migrations are NOT undone)
-  # Use "health: {enabled: false}" to remove the healthcheck entirely.
+# HTTP healthcheck. Probed every 5 minutes and right after every deploy: the
+# deploy's own verdict then says whether the release answers. The URL must be
+# one of this app's own domains and must exist — Laravel serves /up only when
+# the health route is on (bootstrap/app.php: health: '/up'). Off until you
+# uncomment it:
+# health:
+#   url: "https://${domain}/up"
+#   expect: 200
+#   # grace: 8                      # seconds before the first probe after a deploy
+#   # postdeploy: false             # skip the check right after a deploy
+#   # rollback_on_unhealthy: true   # undo a release that fails the check
+#   #                               # (the code symlink only — migrations are NOT undone)
+# "health: {enabled: false}" removes a healthcheck already set on the server.
 
 # Whole-app redirect (every name of the app, www included, in one hop).
 # ACME stays public, and the redirects/proxies below keep working.

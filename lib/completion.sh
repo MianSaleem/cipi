@@ -178,7 +178,7 @@ _cipi_complete() {
 
         deploy)
             if [[ $pos -eq 1 ]]; then sub="$(_cipi_apps)"
-            else sub="--snapshot --rollback --releases --log --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
+            else sub="--snapshot --rollback --releases --log --status --tail= --key --webhook --unlock --trust-host= --rollback-on-unhealthy --audit --days= --json"; fi ;;
 
         use)
             [[ $pos -eq 1 ]] && sub="$(_cipi_apps) --clear" ;;

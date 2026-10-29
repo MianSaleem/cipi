@@ -49,8 +49,14 @@ _health_set() {
     app_exists "$app" || { error "App '$app' not found"; exit 1; }
     parse_args "$@"
     local url="${ARG_url:-}"
-    local expect="${ARG_expect:-200}"
+    local expect="${ARG_expect:-}"
     local grace="${ARG_grace:-}"
+    # `cipi health set <app> --no-postdeploy` adjusts a check that exists: it
+    # keeps the URL and the status already set instead of resetting them to the
+    # defaults, which would silently re-aim a custom URL at /up.
+    [[ -n "$url" ]]    || url=$(app_get "$app" health_url)
+    [[ -n "$expect" ]] || expect=$(app_get "$app" health_expect)
+    [[ -n "$expect" ]] || expect=200
     if [[ -z "$url" ]]; then
         local domain; domain=$(app_get "$app" domain)
         # A wildcard domain answers only on a concrete subdomain, and guessing
@@ -253,12 +259,22 @@ health_post_deploy() {
     error "Healthcheck FAILED after ${HEALTH_PD_ATTEMPTS} attempts — got ${code}, expected ${expect}"
     error "  ${url}"
     warn  "The new release is live and serving this. Roll back with: cipi deploy ${app} --rollback"
+    # A deploy that was never asked to verify anything is a surprise, and a 404
+    # is usually the URL rather than the release: say where this check comes
+    # from and how to change it, right where the verdict is read.
+    if [[ "$code" == "404" ]]; then
+        info "404 means the URL does not exist on the app — Laravel serves /up only with the health route on (bootstrap/app.php: health: '/up')."
+    fi
+    info "This check was set with 'cipi health set ${app}', the panel, or a cipi.yml 'health:' block."
+    info "Change the URL: cipi health set ${app} --url=…   skip it after deploys: cipi health set ${app} --no-postdeploy   remove it: cipi health unset ${app}"
     log_action "HEALTH POSTDEPLOY FAIL: ${app} got=${code} want=${expect} ${url}"
 
     [[ "$notify" != "true" ]] && return 1
+    local origin_hint="This check was set with 'cipi health set ${app}', the panel, or a cipi.yml 'health:' block."
+    [[ "$code" == "404" ]] && origin_hint="404: the URL does not exist on the app — Laravel serves /up only with the health route on (bootstrap/app.php: health: '/up').\n${origin_hint}"
     cipi_notify \
         "Cipi post-deploy healthcheck failed: ${app} on $(hostname)" \
-        "The application did not answer correctly after a ${context}.\n\nServer: $(hostname)\nApp: ${app}\nRelease now live: ${release:-?}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nAttempts: ${HEALTH_PD_ATTEMPTS} over $(( grace + (HEALTH_PD_ATTEMPTS - 1) * HEALTH_PD_DELAY ))s\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nThe release is live and serving this response.\nRoll back with:  cipi deploy ${app} --rollback\nDeploy log:      /home/${app}/logs/deploy.log" \
+        "The application did not answer correctly after a ${context}.\n\nServer: $(hostname)\nApp: ${app}\nRelease now live: ${release:-?}\nURL: ${url}\nExpected: ${expect}\nGot: ${code}\nAttempts: ${HEALTH_PD_ATTEMPTS} over $(( grace + (HEALTH_PD_ATTEMPTS - 1) * HEALTH_PD_DELAY ))s\nTime: $(date '+%Y-%m-%d %H:%M:%S %Z')\n\nThe release is live and serving this response.\nRoll back with:  cipi deploy ${app} --rollback\nDeploy log:      /home/${app}/logs/deploy.log\n\n${origin_hint}\nChange the URL:        cipi health set ${app} --url=…\nSkip it after deploys: cipi health set ${app} --no-postdeploy\nRemove it:             cipi health unset ${app}" \
         deploy_health_fail
     return 1
 }

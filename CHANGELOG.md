@@ -4,6 +4,26 @@ All notable changes to Cipi are documented in this file.
 
 ---
 
+## [5.8.4] — 2026-10-29
+
+From the field: a deploy started by a Git push is invisible while it runs — whoever watches the panel sees nothing until the ledger shows the result — and a release that fails its post-deploy healthcheck is a surprise to someone who never meant to set one (the log read `Healthcheck FAILED after 5 attempts — got 404`, on an app whose `/up` route does not exist). Three things change: Cipi can now say whether a deploy is running, whoever started it; the failed check says where it comes from and how to turn it off; and `cipi yml example` no longer arms a healthcheck when committed as it is.
+
+### Added
+
+- **`cipi deploy <app> --status [--json] [--tail=N]`** — is a deploy running right now? Both deploy paths write the same start and end banners to `/home/<app>/logs/deploy.log`, so the answer covers `cipi deploy`, the panel, a Git push through the webhook, cipi/agent and rollbacks alike. `state` is `running` (with `phase` `deploy` while Deployer builds the release, `post-deploy` while the post-deploy steps, cipi.yml and the healthcheck run after it), `queued` (a push the per-minute cron has not picked up yet), `interrupted` (a start banner with no end and nothing alive any more — a reboot or a kill; the lock left behind is what `--unlock` removes) or `idle`. `current` names the trigger, the branch, the previous release, the start time and the seconds elapsed; `last` the result, kind (deploy or rollback), release, duration, exit code and trigger of the last finished run; `--tail=N` adds the last lines of the log. Timestamps carry the server's UTC offset. Read-only and safe to poll: the panel does, every few seconds, to show a deploy it did not start (cipi/gui 4.1.0 through cipi/api 1.37.0, `GET /api/apps/{name}/deploy/status`).
+- The start banner of a `cipi deploy` run by the panel API says `trigger=panel` (it said `cli`); the audit ledger already told the two apart. `--status` and the panel now do too, while the deploy runs.
+
+### Fixed
+
+- **A failed post-deploy healthcheck says where the check comes from** — `cipi health set`, the panel's "Enable healthcheck", or a `health:` block in cipi.yml — and how to change it: `--url=`, `--no-postdeploy` to keep the five-minute probe but skip the one after deploys, `cipi health unset` to remove it. A 404 adds the usual cause: Laravel serves `/up` only with the health route on (`bootstrap/app.php`, `health: '/up'`). In the deploy log and in the alert email. Nothing about the check itself changes: it still runs only for an app that has a `health_url`, and it never alters the deploy's exit code.
+- **`cipi health set <app> --no-postdeploy`** (or any switch on its own) **keeps the URL and the status already set**; it reset them to `https://<domain>/up` and 200, silently re-aiming a custom URL.
+- **`cipi yml example` ships its `health:` block commented out**, as `cipi yml generate` does for an app without one. Committed as it was, with auto-apply on, the example set a healthcheck on `/up` — and the post-deploy verdict that goes with it — on the first deploy. Its header now says what the file is: a catalogue of every section, to prune before committing; applied whole it would also add aliases, redirects, a proxy, databases and backup profiles.
+
+### Ecosystem
+
+- cipi/api 1.37.0: `GET /api/apps/{name}/deploy/status[?tail=N]` (`deploy-manage`), refused with a 503 on a server older than Cipi 5.8.4, and the matching MCP tool. cipi/gui 4.1.0: a deploy in progress — Git push, command line, panel or rollback — is shown on the app page with its live log tail, listed in the Deploy tab, and announced when it ends; every audit row opens its own deploy log; the app page links to its server; the healthcheck card says the check also runs after every deploy.
+- Tests: `bash tests/verify-5.8.4.sh`.
+
 ## [5.8.3] — 2026-10-28
 
 A security report on the panel API, verified and closed. `GET /api/jobs/{id}` was the one route without an ability: any token of the API, however narrow it had been scoped with `cipi api token create --abilities=…`, could read the result and the CLI output of any job by its id. The output of an app create holds the SSH and database passwords, that of a database create or password change the database password. The id is a UUID that only the caller of the job receives, so it had to leak first (a CI log, a shared screen); still, a scoped token must not read what it could not do.
